@@ -147,7 +147,18 @@ def deref(
         var.wrapped_expr = Cast(uw_var, type=var.type, silent=False)
         var.force()
     stack_info.record_struct_access(var, offset)
-    type: Type = stack_info.unique_type_for("struct", (uw_var, offset), Type.any())
+    # IDO may access the same bytes through different widths (for example,
+    # clearing a matrix with sd before filling its halfword components).
+    # These accesses must not inherit each other's load/store types.
+    access_width = (
+        size
+        if target_info.arch == Target.ArchEnum.MIPS
+        and target_info.compiler == Target.CompilerEnum.IDO
+        else 0
+    )
+    type: Type = stack_info.unique_type_for(
+        "struct", (uw_var, offset, access_width), Type.any()
+    )
 
     if offset >= 0x200000:
         # Structs realistically aren't larger than 2 MB. The offset is more likely

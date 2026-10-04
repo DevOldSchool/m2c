@@ -449,6 +449,13 @@ all 486 tests pass. Updated array/address fixtures preserve their original
 byte addresses and add explicit C pointer conversions. These pilot zeros are
 not recorded or integrated game-source matches.
 
+IDO overlapping field accesses retain their individual instruction widths,
+including partial stores to known pointer/structure fields. The 98-case Conker
+pilot improves `func_150A7C10` from `CURRENT (6845)` to `CURRENT (6655)`;
+73 other scorable cases and all 18 existing zeros are unchanged. Seven focused
+regressions cover mixed widths, signed loads, explicit context, union members
+and plain-pointer inference; all 493 tests pass. No game source is modified.
+
 There is a small test suite, which works as follows:
  - As you develop your commit, occasionally run `./run_tests.py` to see if any tests have changed output.
    These tests run the decompiler on a small corpus of assembly.

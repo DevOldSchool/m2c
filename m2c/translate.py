@@ -567,16 +567,16 @@ class StackInfo:
             return True
         return False
 
-    def get_struct_type_map(self) -> Dict[Expression, Dict[int, Type]]:
-        """Reorganize struct information in unique_type_map by var & offset"""
-        struct_type_map: Dict[Expression, Dict[int, Type]] = {}
+    def get_struct_type_map(self) -> Dict[Expression, Dict[Tuple[int, int], Type]]:
+        """Reorganize struct information by var, offset and access width."""
+        struct_type_map: Dict[Expression, Dict[Tuple[int, int], Type]] = {}
         for (category, key), type in self.unique_type_map.items():
             if category != "struct":
                 continue
-            var, offset = typing.cast(Tuple[Expression, int], key)
+            var, offset, size = typing.cast(Tuple[Expression, int, int], key)
             if var not in struct_type_map:
                 struct_type_map[var] = {}
-            struct_type_map[var][offset] = type
+            struct_type_map[var][offset, size] = type
         return struct_type_map
 
     def __str__(self) -> str:
@@ -1656,7 +1656,9 @@ class StructAccess(Expression):
 
         if field_path is not None and field_path != [0]:
             has_nonzero_access = True
-        elif fmt.valid_syntax and (self.offset != 0 or has_nonzero_access):
+        elif fmt.valid_syntax and (
+            field_path is None or self.offset != 0 or has_nonzero_access
+        ):
             offset_str = fmt.format_int(self.offset)
             return f"M2C_FIELD({var.format(fmt)}, {Type.ptr(self.type).format(fmt)}, {offset_str})"
         else:
@@ -4352,11 +4354,11 @@ def resolve_types_late(stack_info: StackInfo) -> None:
     # Use dereferences to determine pointer types
     struct_type_map = stack_info.get_struct_type_map()
     for var, offset_type_map in struct_type_map.items():
-        if len(offset_type_map) == 1 and 0 in offset_type_map:
+        if len(offset_type_map) == 1 and next(iter(offset_type_map))[0] == 0:
             # var was probably a plain pointer, not a struct
             # Try to unify it with the appropriate pointer type,
             # to fill in the type if it does not already have one
-            type = offset_type_map[0]
+            type = next(iter(offset_type_map.values()))
             var.type.unify(Type.ptr(type))
 
 
