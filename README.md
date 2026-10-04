@@ -492,6 +492,13 @@ physical stack pointer; out-of-bounds and unmasked cases retain their handling.
 prior scorable cases and 22 zeros are unchanged. Six focused bound/layout
 tests and all 526 tests pass.
 
+IDO captures an earlier signed halfword field load before a later unsigned
+halfword load from the same object, preserving the ASM evaluation order and
+word-sized register snapshot without changing field/return widths. Conker
+`func_1515F008` improves from `CURRENT (60)` to `CURRENT (45)`; the other
+91 scorable cases and all 22 zeros are unchanged. Six focused regressions
+and all 532 suite tests pass.
+
 There is a small test suite, which works as follows:
  - As you develop your commit, occasionally run `./run_tests.py` to see if any tests have changed output.
    These tests run the decompiler on a small corpus of assembly.

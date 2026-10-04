@@ -3878,6 +3878,17 @@ class NodeState:
                     # Keep reused narrow global loads as the ASM register's
                     # snapshot. Repeated C reads may alias intervening stores.
                     transparent = False
+                if uw_expr.type.is_unsigned() and load.target_size == 2:
+                    base = early_unwrap(load.struct_var)
+                    # Retain an earlier signed halfword load before a later
+                    # unsigned halfword load from the same object.
+                    self._prevent_later_uses(
+                        lambda e: isinstance(e, StructAccess)
+                        and e.target_size == 2
+                        and e.type.is_signed()
+                        and e.offset != load.offset
+                        and early_unwrap(e.struct_var) == base
+                    )
 
         expr = self._eval_once(
             uw_expr,
