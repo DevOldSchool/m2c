@@ -462,6 +462,12 @@ In the same 98-case Conker pilot, eight previously compile-failing starters
 become scorable; all 74 prior scores and 18 zeros remain unchanged. Seven
 focused arithmetic/type-preservation tests and all 500 suite tests pass.
 
+Function definitions retain explicitly volatile scalar parameters from context,
+including typedef qualifiers, while preserving their ABI widths. This restores
+compilation of Conker `func_151D5D60` (`CURRENT (615)`); all 82 previously
+scorable pilot cases and 18 zeros are unchanged. Seven focused tests and all
+507 tests pass. Division fixtures now retain the qualifiers in their `orig.c`.
+
 There is a small test suite, which works as follows:
  - As you develop your commit, occasionally run `./run_tests.py` to see if any tests have changed output.
    These tests run the decompiler on a small corpus of assembly.
