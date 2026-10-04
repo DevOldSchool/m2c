@@ -1250,6 +1250,16 @@ class BinaryOp(Condition):
                 return expr
         return self
 
+    def uses_void_pointer_arithmetic(self) -> bool:
+        if self.op not in ("+", "-"):
+            return False
+        return any(self.is_void_pointer(expr.type) for expr in (self.left, self.right))
+
+    @staticmethod
+    def is_void_pointer(type: Type) -> bool:
+        target = type.get_pointer_target()
+        return type.is_pointer() and (target is None or target.is_void())
+
     def format(self, fmt: Formatter) -> str:
         left_expr = late_unwrap(self.left)
         right_expr = late_unwrap(self.right)
@@ -1290,6 +1300,15 @@ class BinaryOp(Condition):
             rhs = right_expr.format(fmt, force_dec=True)
         else:
             rhs = right_expr.format(fmt)
+
+        if fmt.valid_syntax and self.uses_void_pointer_arithmetic():
+            # ASM offsets on void pointers count bytes. Use byte pointers in
+            # the emitted expression without changing context or inferred types.
+            byte_pointer = Type.ptr(Type.u8()).format(fmt)
+            if self.is_void_pointer(left_expr.type):
+                lhs = f"({byte_pointer}) {left_expr.format(fmt)}"
+            if self.is_void_pointer(right_expr.type):
+                rhs = f"({byte_pointer}) {right_expr.format(fmt)}"
 
         # These aren't real operators (or functions); format them as a fn call
         if self.op in PSEUDO_FUNCTION_OPS:
@@ -2960,6 +2979,9 @@ def format_assignment(
     source = late_unwrap(source)
     if isinstance(source, BinaryOp) and source.op in COMPOUND_ASSIGNMENT_OPS:
         source = source.normalize_for_formatting()
+        if fmt.valid_syntax and source.uses_void_pointer_arithmetic():
+            # A void-pointer lvalue cannot use += or -= in IDO C.
+            return f"{dest.format(fmt)} = {format_expr(source, fmt)};"
         rhs = None
         if is_dest(late_unwrap(source.left)):
             rhs = source.right

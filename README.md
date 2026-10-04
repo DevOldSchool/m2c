@@ -456,6 +456,12 @@ pilot improves `func_150A7C10` from `CURRENT (6845)` to `CURRENT (6655)`;
 regressions cover mixed widths, signed loads, explicit context, union members
 and plain-pointer inference; all 493 tests pass. No game source is modified.
 
+Valid-syntax output uses byte-pointer casts for void-pointer arithmetic,
+including increments and pointer differences, without changing context types.
+In the same 98-case Conker pilot, eight previously compile-failing starters
+become scorable; all 74 prior scores and 18 zeros remain unchanged. Seven
+focused arithmetic/type-preservation tests and all 500 suite tests pass.
+
 There is a small test suite, which works as follows:
  - As you develop your commit, occasionally run `./run_tests.py` to see if any tests have changed output.
    These tests run the decompiler on a small corpus of assembly.
