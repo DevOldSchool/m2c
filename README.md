@@ -499,6 +499,13 @@ word-sized register snapshot without changing field/return widths. Conker
 91 scorable cases and all 22 zeros are unchanged. Six focused regressions
 and all 532 suite tests pass.
 
+IDO snapshots field pointers before reading their targets, preserving context
+pointer types. Target stores retain their existing form: a broader capture
+rule was rejected because it regressed two zero starters. The narrowed rule
+improves `func_15104520` 25 to 15, `func_150B66DC` 855 to 725 and
+`func_15133EEC` 2587 to 2517; all 89 other scorable cases and 22 zeros
+remain unchanged. Seven focused tests and all 539 suite tests pass.
+
 There is a small test suite, which works as follows:
  - As you develop your commit, occasionally run `./run_tests.py` to see if any tests have changed output.
    These tests run the decompiler on a small corpus of assembly.

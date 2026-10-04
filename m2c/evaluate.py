@@ -130,6 +130,22 @@ def deref(
     if (
         target_info.arch == Target.ArchEnum.MIPS
         and target_info.compiler == Target.CompilerEnum.IDO
+        and not store
+        and isinstance(var, EvalOnceExpr)
+        and not var.var.is_planned
+        and isinstance(uw_var, StructAccess)
+        and uw_var.target_size == 4
+        and not (
+            isinstance(uw_var.struct_var, AddressOf)
+            and isinstance(uw_var.struct_var.expr, GlobalSymbol)
+        )
+    ):
+        # The assembly loaded a field pointer before reading its target.
+        # Retain that register snapshot instead of nesting both loads in C.
+        var.force()
+    if (
+        target_info.arch == Target.ArchEnum.MIPS
+        and target_info.compiler == Target.CompilerEnum.IDO
         and isinstance(var, EvalOnceExpr)
         and not var.var.is_planned
         and isinstance(uw_var, BinaryOp)
