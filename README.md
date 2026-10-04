@@ -484,6 +484,14 @@ Five formerly unsupported Conker starters become scorable. Four have full-span
 unchanged. Six focused tests and all 520 tests pass. These are standalone
 first-pass results, not integrated game-source matches.
 
+IDO recovery recognizes homogeneous copied stack arrays when a masked index
+proves that an indirect byte access stays within their inferred storage. The
+valid C expression uses the local object's address instead of an undefined
+physical stack pointer; out-of-bounds and unmasked cases retain their handling.
+`func_151D9918` and `func_151D9A20` now compile and score 360 each; all 90
+prior scorable cases and 22 zeros are unchanged. Six focused bound/layout
+tests and all 526 tests pass.
+
 There is a small test suite, which works as follows:
  - As you develop your commit, occasionally run `./run_tests.py` to see if any tests have changed output.
    These tests run the decompiler on a small corpus of assembly.

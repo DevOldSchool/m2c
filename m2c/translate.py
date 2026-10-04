@@ -396,6 +396,23 @@ class StackInfo:
         return self.param_names.get(loc)
 
     def add_local_var(self, var: LocalVar) -> None:
+        if (
+            var.path is not None
+            and len(var.path) > 2
+            and self.stack_pointer_type is not None
+            and self.global_info.target.arch == Target.ArchEnum.MIPS
+            and self.global_info.target.compiler == Target.CompilerEnum.IDO
+        ):
+            target = self.stack_pointer_type.get_pointer_target()
+            if target is not None and target.is_struct():
+                struct = target.data().struct
+                assert struct is not None
+                for field in struct.fields:
+                    if field.name == var.path[1] and field.type.is_array():
+                        var = LocalVar(
+                            field.offset, type=field.type, path=[0, field.name]
+                        )
+                        break
         if any(v.value == var.value for v in self.local_vars):
             return
         self.local_vars.append(var)
@@ -1689,6 +1706,30 @@ class StructAccess(Expression):
         has_nonzero_access = False
         if self.stack_info is not None:
             has_nonzero_access = self.stack_info.has_nonzero_access(var)
+            indexed_stack = bounded_stack_index(var)
+            if (
+                fmt.valid_syntax
+                and indexed_stack is not None
+                and self.stack_info.global_info.target.arch == Target.ArchEnum.MIPS
+                and self.stack_info.global_info.target.compiler
+                == Target.CompilerEnum.IDO
+            ):
+                index, maximum = indexed_stack
+                for local in self.stack_info.local_vars:
+                    size = local.type.get_size_bytes()
+                    if (
+                        local.type.is_array()
+                        and size is not None
+                        and self.target_size is not None
+                        and local.value <= self.offset
+                        and self.offset + maximum + self.target_size
+                        <= local.value + size
+                    ):
+                        # Replace a bounded access through the physical stack
+                        # pointer with the corresponding local object's address.
+                        offset = fmt.format_int(self.offset - local.value)
+                        address = f"((u8 *) &{local.format(fmt)} + ({format_expr(index, fmt)}))"
+                        return f"M2C_FIELD({address}, {Type.ptr(self.type).format(fmt)}, {offset})"
 
         field_path: Optional[AccessPath] = self.late_field_path()
 
@@ -4403,6 +4444,37 @@ def translate_all_blocks(
                 translate_stack.append((state, child))
 
 
+def bounded_stack_index(var: Expression) -> Optional[Tuple[Expression, int]]:
+    """Recognize sp + ((unsigned value & mask) * positive stride)."""
+    var = early_unwrap(var)
+    if not isinstance(var, BinaryOp) or var.op != "+":
+        return None
+    for base, index in ((var.left, var.right), (var.right, var.left)):
+        base = early_unwrap(base)
+        scaled = early_unwrap(index)
+        if not (
+            isinstance(base, GlobalSymbol)
+            and base.c_symbol_name == "sp"
+            and not base.symbol_in_context
+            and isinstance(scaled, BinaryOp)
+            and scaled.op == "*"
+        ):
+            continue
+        stride = early_unwrap(scaled.right)
+        masked = early_unwrap(scaled.left)
+        if not (
+            isinstance(stride, Literal)
+            and stride.value > 0
+            and isinstance(masked, BinaryOp)
+            and masked.op == "&"
+        ):
+            continue
+        mask = early_unwrap(masked.right)
+        if isinstance(mask, Literal) and 0 <= mask.value <= 0xFFFF:
+            return index, mask.value * stride.value
+    return None
+
+
 def resolve_types_late(stack_info: StackInfo) -> None:
     """
     After translating a function, perform a final type-resolution pass.
@@ -4414,6 +4486,11 @@ def resolve_types_late(stack_info: StackInfo) -> None:
 
     # Use dereferences to determine pointer types
     struct_type_map = stack_info.get_struct_type_map()
+    indexed_stack_accesses = [
+        (offsets, indexed[1])
+        for var, offsets in struct_type_map.items()
+        if (indexed := bounded_stack_index(var)) is not None
+    ]
     for var, offset_type_map in struct_type_map.items():
         if len(offset_type_map) == 1 and next(iter(offset_type_map))[0] == 0:
             # var was probably a plain pointer, not a struct
@@ -4421,6 +4498,40 @@ def resolve_types_late(stack_info: StackInfo) -> None:
             # to fill in the type if it does not already have one
             type = next(iter(offset_type_map.values()))
             var.type.unify(Type.ptr(type))
+        elif (
+            indexed_stack_accesses
+            and stack_info.global_info.target.arch == Target.ArchEnum.MIPS
+            and stack_info.global_info.target.compiler == Target.CompilerEnum.IDO
+            and isinstance(var, AddressOf)
+            and isinstance(var.expr, LocalVar)
+            and var.expr.type.get_size_bytes() is None
+        ):
+            keys = sorted(offset_type_map)
+            width = keys[0][1]
+            element = offset_type_map[keys[0]]
+            length = len(keys)
+            start = var.expr.value
+            end = start + width * length
+            if (
+                width > 0
+                and keys == [(i * width, width) for i in range(length)]
+                and element.format(Formatter())
+                in ("s8", "u8", "s16", "u16", "s32", "u32", "s64", "u64")
+                and all(
+                    t.format(Formatter()) == element.format(Formatter())
+                    for t in offset_type_map.values()
+                )
+                and end <= stack_info.allocated_stack_size
+                and not any(
+                    start < local.value < end for local in stack_info.local_vars
+                )
+                and any(
+                    start <= offset and offset + maximum + access_width <= end
+                    for accesses, maximum in indexed_stack_accesses
+                    for offset, access_width in accesses
+                )
+            ):
+                var.expr.type.unify(Type.array(element, length))
 
 
 @dataclass
