@@ -1310,6 +1310,25 @@ class BinaryOp(Condition):
             if self.is_void_pointer(right_expr.type):
                 rhs = f"({byte_pointer}) {right_expr.format(fmt)}"
 
+        if fmt.valid_syntax and self.op in ("==", "!="):
+            left_pointer = left_expr.type.decay()
+            right_pointer = right_expr.type.decay()
+            left_target = left_pointer.get_pointer_target()
+            right_target = right_pointer.get_pointer_target()
+            if (
+                left_target is not None
+                and right_target is not None
+                and not left_target.is_void()
+                and not right_target.is_void()
+                and not left_target.is_function()
+                and not right_target.is_function()
+                and left_pointer.format(fmt) != right_pointer.format(fmt)
+            ):
+                # IDO rejects equality between differently typed object
+                # pointers. Compare addresses without unifying their targets.
+                lhs = f"(void *) {left_expr.format(fmt)}"
+                rhs = f"(void *) {right_expr.format(fmt)}"
+
         # These aren't real operators (or functions); format them as a fn call
         if self.op in PSEUDO_FUNCTION_OPS:
             return f"{self.op}({lhs}, {rhs})"

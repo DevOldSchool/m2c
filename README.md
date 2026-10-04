@@ -468,6 +468,12 @@ compilation of Conker `func_151D5D60` (`CURRENT (615)`); all 82 previously
 scorable pilot cases and 18 zeros are unchanged. Seven focused tests and all
 507 tests pass. Division fixtures now retain the qualifiers in their `orig.c`.
 
+Valid-syntax equality between differently typed object pointers compares their
+addresses through explicit void-pointer casts, preserving the original target
+types. Conker `func_1509CB68` and `func_1503B840` now compile and score 1910
+and 1770 respectively; all 83 prior scores and 18 zeros are unchanged. Seven
+focused comparison tests and all 514 suite tests pass.
+
 There is a small test suite, which works as follows:
  - As you develop your commit, occasionally run `./run_tests.py` to see if any tests have changed output.
    These tests run the decompiler on a small corpus of assembly.
