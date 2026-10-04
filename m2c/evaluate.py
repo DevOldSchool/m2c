@@ -29,6 +29,7 @@ from .translate import (
     Cast,
     Condition,
     ErrorExpr,
+    EvalOnceExpr,
     ExprCondition,
     ExprStmt,
     Expression,
@@ -125,6 +126,26 @@ def deref(
             uw_var = early_unwrap(var)
 
     var.type.unify(Type.ptr())
+    target_info = stack_info.global_info.target
+    if (
+        target_info.arch == Target.ArchEnum.MIPS
+        and target_info.compiler == Target.CompilerEnum.IDO
+        and isinstance(var, EvalOnceExpr)
+        and not var.var.is_planned
+        and isinstance(uw_var, BinaryOp)
+        and uw_var.op in ("+", "-")
+        and not uw_var.left.type.is_pointer_or_array()
+        and not uw_var.right.type.is_pointer_or_array()
+        and any(
+            isinstance(operand, BinaryOp) and operand.op == "*"
+            for operand in map(early_unwrap, (uw_var.left, uw_var.right))
+        )
+    ):
+        # A scaled integer address computed in a register is a useful pointer local.
+        # Keep its operands' integer ABI types, and make the C conversion
+        # explicit rather than repeatedly embedding the address in field macros.
+        var.wrapped_expr = Cast(uw_var, type=var.type, silent=False)
+        var.force()
     stack_info.record_struct_access(var, offset)
     type: Type = stack_info.unique_type_for("struct", (uw_var, offset), Type.any())
 

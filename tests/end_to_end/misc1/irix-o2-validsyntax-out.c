@@ -11,7 +11,7 @@ s32 test(s32 arg0, M2C_UNK arg1) {
     s32 temp_v0_2;
     void *temp_v0;
 
-    temp_v0 = D_410170 + (arg0 * 8);
+    temp_v0 = (void *) (D_410170 + (arg0 * 8));
     temp_a2 = M2C_FIELD(temp_v0, s32 *, 4) + 1;
     sp2C = temp_a2;
     sp24 = M2C_FIELD(temp_v0, s32 *, 8);

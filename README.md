@@ -434,6 +434,21 @@ game-source matches. Eight focused tests and a standalone fixture cover
 constant ranges, signed contexts/loads, global fields, compiler targeting and
 parameter widths; all 480 tests pass. This improvement is local and unpushed.
 
+A further IDO recovery captures scaled integer addresses as explicitly cast
+pointer locals while retaining integer operand and parameter types. Known
+pointer arithmetic and constant field offsets retain their handling. Real
+Conker `func_15087FC4` improves from `CURRENT (10)` to `CURRENT (0)`. An expanded
+98-case pilot across 96 distinct functions includes the original 50 cases and
+48 deterministic controls covering floating-point operations, branches/loops,
+direct calls and bit operations. Of 74 scorable cases, one improves and 73
+are unchanged, with no regressions; 24 unsupported or compile-failing cases
+remain excluded. All 17 existing zeros survive and one new full-span zero
+starter is produced. Six focused tests cover pointer conversions, integer
+parameter types, load returns, input reuse, compiler targeting and rule limits;
+all 486 tests pass. Updated array/address fixtures preserve their original
+byte addresses and add explicit C pointer conversions. These pilot zeros are
+not recorded or integrated game-source matches.
+
 There is a small test suite, which works as follows:
  - As you develop your commit, occasionally run `./run_tests.py` to see if any tests have changed output.
    These tests run the decompiler on a small corpus of assembly.
