@@ -5,7 +5,7 @@ s32 test(s32 *x) {
     s32 temp_r2;
 
     sp0 = x->unk0;
-    sp4 = x + 0x28;
+    sp4 = x + 0xA;
     sp8 = x->unk190;
     sp0 = *func_00400090(&sp0) + sp0;
     sp4 = func_00400090(&sp4);

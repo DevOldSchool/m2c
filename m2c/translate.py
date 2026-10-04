@@ -1047,6 +1047,7 @@ class BinaryOp(Condition):
     op: str
     right: Expression
     type: Type
+    byte_offset: bool = False
 
     @staticmethod
     def int(left: Expression, op: str, right: Expression) -> BinaryOp:
@@ -1217,6 +1218,22 @@ class BinaryOp(Condition):
 
     def normalize_for_formatting(self) -> BinaryOp:
         right_expr = late_unwrap(self.right)
+        if (
+            self.byte_offset
+            and self.op in ("+", "-")
+            and isinstance(right_expr, Literal)
+        ):
+            target = self.left.type.decay().get_pointer_target()
+            size = target.get_size_bytes() if target is not None else None
+            if size and right_expr.value % size == 0:
+                # ASM pointer immediates count bytes; C pointer arithmetic
+                # counts elements. Keep the IR byte offset until formatting
+                # so dereference/field recovery still sees the raw address.
+                return replace(
+                    self,
+                    right=Literal(right_expr.value // size, type=right_expr.type),
+                    byte_offset=False,
+                ).normalize_for_formatting()
         if (
             not self.is_floating()
             and isinstance(right_expr, Literal)
@@ -1663,6 +1680,18 @@ class StructAccess(Expression):
 
         # Rewrite `x->unk0` to `*x` and `x.unk0` to `x`, unless has_nonzero_access
         if self.offset == 0 and not has_nonzero_access:
+            if (
+                fmt.valid_syntax
+                and deref
+                and isinstance(var, BinaryOp)
+                and var.op in ("+", "-")
+                and not var.left.type.is_pointer_or_array()
+                and not var.right.type.is_pointer_or_array()
+            ):
+                # The address expression may have acquired a pointer type
+                # without either operand becoming a pointer. Its C expression
+                # still computes an integer, so cast before dereferencing it.
+                return f"M2C_FIELD({var.format(fmt)}, {Type.ptr(self.type).format(fmt)}, 0)"
             return f"{'*' if deref else ''}{var.format(fmt)}"
 
         return f"{parenthesize_for_struct_access(var, fmt)}{field_name}"
@@ -2703,8 +2732,39 @@ class InstrArgs:
             return self.full_imm(index)
         raise DecompFailure(f"Bad function call operand {arg}")
 
+    def mips_hi_ref(self, reg: Register) -> Optional[RawSymbolRef]:
+        # Inspect the defining instruction, not just the simplified address:
+        # addiu with %lo also simplifies to that address, but consumes the hi.
+        if self.stack_info.global_info.target.arch != Target.ArchEnum.MIPS:
+            return None
+        value = self.regs.get_raw(reg)
+        if not isinstance(value, EvalOnceExpr) or len(value.sources) != 1:
+            return None
+        source = value.sources[0]
+        if not isinstance(source, InstrRef):
+            return None
+        instruction = source.instruction
+        if instruction.arch_mnemonic(self.stack_info.global_info.arch) != "mips:lui":
+            return None
+        arg = instruction.args[1]
+        if isinstance(arg, Macro) and arg.macro_name == "hi":
+            return parse_symbol_ref(arg.argument)
+        return None
+
     def memory_ref(self, index: int) -> Union[AddressMode, RawSymbolRef]:
-        ret = strip_macros(self.raw_arg(index))
+        raw = self.raw_arg(index)
+        if (
+            isinstance(raw, AsmAddressMode)
+            and isinstance(raw.addend, Macro)
+            and raw.addend.macro_name == "lo"
+        ):
+            # One lui may serve several globals with the same upper half.
+            # A different %lo names the actual destination and its own addend.
+            ref = parse_symbol_ref(raw.addend.argument)
+            hi_ref = self.mips_hi_ref(raw.base)
+            if ref is not None and hi_ref is not None and ref != hi_ref:
+                return ref
+        ret = strip_macros(raw)
 
         # For MIPS, we want to allow "lw $v0, symbol + 4", which is outputted by
         # some disassemblers (like IDA) even though it isn't valid assembly.
@@ -3153,8 +3213,8 @@ def format_f64_imm(num: int) -> str:
 def strip_macros(arg: Argument) -> Argument:
     """Replace %lo(...) by 0, and assert that there are no %hi(...). We assume that
     %hi's only ever occur in lui, where we expand them to an entire value, and not
-    just the upper part. This preserves semantics in most cases (though not when %hi's
-    are reused for different %lo's...)"""
+    just the upper part. InstrArgs.memory_ref recovers differing symbolic %lo's
+    with a directly defined MIPS lui base before reaching this fallback."""
     if isinstance(arg, Macro):
         if arg.macro_name in ["sda2", "sda21"]:
             return arg.argument
@@ -3692,17 +3752,41 @@ class NodeState:
         function_return: bool = False,
     ) -> Expression:
         source = self.regs.current_instr_ref()
+        word_snapshot = False
 
         if transparent is None:
             transparent = should_wrap_transparently(uw_expr)
+            target = self.stack_info.global_info.target
+            load = uw_expr
+            while isinstance(load, Cast):
+                load = load.expr
+            if (
+                target.arch == Target.ArchEnum.MIPS
+                and target.compiler == Target.CompilerEnum.IDO
+                and uw_expr.type.get_size_bytes() in (1, 2)
+                and isinstance(load, StructAccess)
+                and load.target_size in (1, 2)
+            ):
+                word_snapshot = True
+                if isinstance(load.struct_var, AddressOf) and isinstance(
+                    load.struct_var.expr, GlobalSymbol
+                ):
+                    # Keep reused narrow global loads as the ASM register's
+                    # snapshot. Repeated C reads may alias intervening stores.
+                    transparent = False
 
-        expr: RegExpression = self._eval_once(
+        expr = self._eval_once(
             uw_expr,
             emit_exactly_once=emit_exactly_once,
             transparent=transparent,
             reg=reg,
             source=source,
         )
+        if word_snapshot and not expr.var.is_planned:
+            # lb/lbu/lh/lhu results fit in s32, and C promotes both signed and
+            # unsigned byte/halfword values to s32. Widen only this single-write
+            # local declaration; keep the load and inferred ABI types intact.
+            expr.var.type = Type.s32()
 
         if reg == Register("zero"):
             # Emit the expression as is. It's probably a volatile load.
@@ -3800,6 +3884,24 @@ class NodeState:
         self.prevent_later_value_uses(dest)
         self.prevent_later_function_calls()
         self.write_statement(store)
+
+        target = self.stack_info.global_info.target
+        if (
+            target.arch == Target.ArchEnum.MIPS
+            and target.compiler == Target.CompilerEnum.IDO
+            and isinstance(dest, StructAccess)
+            and dest.target_size in (1, 2)
+        ):
+            # Keep an earlier word-sized field read as the register's snapshot
+            # when a narrow store to the same object precedes its later use.
+            # Besides preserving load order, this avoids extending that read
+            # across a write when the field layout is only partially known.
+            base = early_unwrap(dest.struct_var)
+            self._prevent_later_uses(
+                lambda expr: isinstance(expr, StructAccess)
+                and expr.target_size == 4
+                and early_unwrap(expr.struct_var) == base
+            )
 
     def push_subroutine_arg(self, source: Expression) -> None:
         self.subroutine_args = {

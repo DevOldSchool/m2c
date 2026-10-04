@@ -3,7 +3,7 @@ s32 test(s32 *x) {
     s32 *sp10;
     s32 spC;
 
-    sp10 = x + 0x28;
+    sp10 = x + 0xA;
     sp14 = (s8) x->unk0;
     spC = x->unk190;
     sp14 = (u8) sp14 + *func_00400090(&sp14);

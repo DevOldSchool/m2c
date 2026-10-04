@@ -40,6 +40,7 @@ from .translate import (
     LocalVar,
     Lwl,
     NodeState,
+    PassedInArg,
     RawSymbolRef,
     RegExpression,
     RegInfo,
@@ -467,7 +468,11 @@ def add_imm(
                 if target_size and imm.value % target_size == 0:
                     # Pointer addition.
                     return BinaryOp(
-                        left=source, op="+", right=as_intish(imm), type=source.type
+                        left=source,
+                        op="+",
+                        right=as_intish(imm),
+                        type=source.type,
+                        byte_offset=True,
                     )
         return BinaryOp(left=source, op="+", right=as_intish(imm), type=Type.ptr())
     elif isinstance(source, Literal) and isinstance(imm, Literal):
@@ -643,6 +648,37 @@ def make_store_real(
         return None
     dest = deref(target, regs, stack_info, size=size, store=True)
     dest.type.unify(type)
+    target_info = stack_info.global_info.target
+    source_arg = early_unwrap(source_val)
+    if (
+        target_info.arch == Target.ArchEnum.MIPS
+        and target_info.compiler == Target.CompilerEnum.IDO
+        and size in (1, 2)
+        and isinstance(dest, StructAccess)
+        and isinstance(source_arg, Literal)
+        and (1 << (size * 8 - 1)) <= source_arg.value < (1 << (size * 8))
+        and not dest.type.is_signed()
+    ):
+        # Prefer unsigned for an ambiguous narrow field with a positive
+        # high-bit constant. IDO otherwise folds a byte store of 255 to
+        # -1. Infer only when compatible with the destination's existing type;
+        # explicit signed fields and negative/wider constants keep their types.
+        unsigned = Type.u8() if size == 1 else Type.u16()
+        if dest.type.unify(unsigned):
+            type = unsigned
+    # A narrow store truncates the value; it does not establish the width of
+    # an incoming parameter. In particular, IDO can emit sb/sh directly from
+    # a word-sized parameter. Keep unknown register arguments word-sized,
+    # while respecting narrow types supplied by context or other instructions.
+    if (
+        target_info.arch == Target.ArchEnum.MIPS
+        and target_info.compiler == Target.CompilerEnum.IDO
+        and size < 4
+        and isinstance(source_arg, PassedInArg)
+        and source_arg.loc.reg is not None
+        and source_val.type.get_size_bits() is None
+    ):
+        source_val.type.unify(Type.reg32(likely_float=False))
     return StoreStmt(source=as_type(source_val, type, silent=is_stack), dest=dest)
 
 
