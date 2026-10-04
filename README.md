@@ -474,6 +474,16 @@ types. Conker `func_1509CB68` and `func_1503B840` now compile and score 1910
 and 1770 respectively; all 83 prior scores and 18 zeros are unchanged. Seven
 focused comparison tests and all 514 suite tests pass.
 
+Unknown external globals used only by address can be represented in valid C
+as byte storage of unspecified extent, without assuming an object layout.
+Typed field accesses retain the original instruction widths and offsets;
+context types, defined data and globals read by value retain their handling.
+Five formerly unsupported Conker starters become scorable. Four have full-span
+`CURRENT (0)`: `func_15125690`, `func_1503DF0C`, `func_15052F58` and
+`func_150221E8`; `func_1517E05C` scores 100. All 85 prior scores remain
+unchanged. Six focused tests and all 520 tests pass. These are standalone
+first-pass results, not integrated game-source matches.
+
 There is a small test suite, which works as follows:
  - As you develop your commit, occasionally run `./run_tests.py` to see if any tests have changed output.
    These tests run the decompiler on a small corpus of assembly.

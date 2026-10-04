@@ -1763,12 +1763,24 @@ class GlobalSymbol(Expression):
     initializer_in_typemap: bool = False
     demangled_str: Optional[str] = None
     is_referenced: bool = False
+    is_value_used: bool = False
 
     def dependencies(self) -> List[Expression]:
         return []
 
     def use(self) -> None:
         self.is_referenced = True
+        self.is_value_used = True
+
+    def is_unknown_address_storage(self, fmt: Formatter) -> bool:
+        return (
+            fmt.valid_syntax
+            and self.is_referenced
+            and not self.is_value_used
+            and not self.symbol_in_context
+            and self.asm_data_entry is None
+            and self.type.format(fmt) == "M2C_UNK"
+        )
 
     def is_string_constant(self) -> bool:
         ent = self.asm_data_entry
@@ -1891,8 +1903,16 @@ class AddressOf(Expression):
     def dependencies(self) -> List[Expression]:
         return [self.expr]
 
+    def use(self) -> None:
+        if isinstance(self.expr, GlobalSymbol):
+            self.expr.is_referenced = True
+        else:
+            super().use()
+
     def format(self, fmt: Formatter) -> str:
         if isinstance(self.expr, GlobalSymbol):
+            if self.expr.is_unknown_address_storage(fmt):
+                return f"((u8 *) {self.expr.format(fmt)})"
             if self.expr.is_string_constant():
                 return self.expr.format_string_constant(fmt)
         if self.expr.type.is_array():
@@ -4849,11 +4869,18 @@ class GlobalInfo:
 
                 qualifier = f"{qualifier} " if qualifier else ""
                 value = f" = {value}" if value else ""
+                declaration = sym.type.to_decl(name, fmt)
+                if sym.is_unknown_address_storage(fmt):
+                    # No object layout is known or required: only its address
+                    # is used. Keep the extent unspecified and let each typed
+                    # field access express its actual instruction width.
+                    declaration = Type.array(Type.u8(), None).to_decl(name, fmt)
+                    comments.append("unknown layout; byte-addressed storage")
                 lines.append(
                     (
                         sort_order,
                         fmt.with_comments(
-                            f"{qualifier}{sym.type.to_decl(name, fmt)}{value};",
+                            f"{qualifier}{declaration}{value};",
                             comments,
                         )
                         + "\n",
