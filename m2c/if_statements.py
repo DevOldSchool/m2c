@@ -13,6 +13,7 @@ from typing import (
     Union,
 )
 
+from .c_types import resolve_typedefs
 from .flow_graph import (
     BasicNode,
     ConditionalNode,
@@ -1448,13 +1449,30 @@ def get_function_text(function_info: FunctionInfo, options: Options) -> str:
             function_lines.append(line)
 
     fn_name = function_info.symbol.c_symbol_name
+    typemap = function_info.stack_info.global_info.typemap
+    context_fn = typemap.functions.get(fn_name)
+    context_params = context_fn.params if context_fn is not None else None
     arg_strs = []
     for i, arg in enumerate(function_info.stack_info.arguments):
         if i == 0 and function_info.stack_info.replace_first_arg is not None:
             original_name, original_type = function_info.stack_info.replace_first_arg
             arg_strs.append(original_type.to_decl(original_name, fmt))
         else:
-            arg_strs.append(arg.type.to_decl(arg.format(fmt), fmt))
+            arg_decl = arg.type.to_decl(arg.format(fmt), fmt)
+            if (
+                context_params is not None
+                and i < len(context_params)
+                and (arg.type.is_int() or arg.type.is_float())
+            ):
+                original_type = context_params[i].type
+                resolved_type, _ = resolve_typedefs(original_type, typemap)
+                if "volatile" in getattr(
+                    original_type, "quals", []
+                ) or "volatile" in getattr(resolved_type, "quals", []):
+                    # Keep explicit scalar volatility from the context. IDO
+                    # checks this qualifier against previous declarations.
+                    arg_decl = "volatile " + arg_decl
+            arg_strs.append(arg_decl)
     if function_info.stack_info.is_variadic:
         arg_strs.append("...")
     arg_str = ", ".join(arg_strs) or "void"

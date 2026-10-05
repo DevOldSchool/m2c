@@ -29,6 +29,7 @@ from .translate import (
     Cast,
     Condition,
     ErrorExpr,
+    EvalOnceExpr,
     ExprCondition,
     ExprStmt,
     Expression,
@@ -40,6 +41,7 @@ from .translate import (
     LocalVar,
     Lwl,
     NodeState,
+    PassedInArg,
     RawSymbolRef,
     RegExpression,
     RegInfo,
@@ -124,8 +126,55 @@ def deref(
             uw_var = early_unwrap(var)
 
     var.type.unify(Type.ptr())
+    target_info = stack_info.global_info.target
+    if (
+        target_info.arch == Target.ArchEnum.MIPS
+        and target_info.compiler == Target.CompilerEnum.IDO
+        and not store
+        and isinstance(var, EvalOnceExpr)
+        and not var.var.is_planned
+        and isinstance(uw_var, StructAccess)
+        and uw_var.target_size == 4
+        and not (
+            isinstance(uw_var.struct_var, AddressOf)
+            and isinstance(uw_var.struct_var.expr, GlobalSymbol)
+        )
+    ):
+        # The assembly loaded a field pointer before reading its target.
+        # Retain that register snapshot instead of nesting both loads in C.
+        var.force()
+    if (
+        target_info.arch == Target.ArchEnum.MIPS
+        and target_info.compiler == Target.CompilerEnum.IDO
+        and isinstance(var, EvalOnceExpr)
+        and not var.var.is_planned
+        and isinstance(uw_var, BinaryOp)
+        and uw_var.op in ("+", "-")
+        and not uw_var.left.type.is_pointer_or_array()
+        and not uw_var.right.type.is_pointer_or_array()
+        and any(
+            isinstance(operand, BinaryOp) and operand.op == "*"
+            for operand in map(early_unwrap, (uw_var.left, uw_var.right))
+        )
+    ):
+        # A scaled integer address computed in a register is a useful pointer local.
+        # Keep its operands' integer ABI types, and make the C conversion
+        # explicit rather than repeatedly embedding the address in field macros.
+        var.wrapped_expr = Cast(uw_var, type=var.type, silent=False)
+        var.force()
     stack_info.record_struct_access(var, offset)
-    type: Type = stack_info.unique_type_for("struct", (uw_var, offset), Type.any())
+    # IDO may access the same bytes through different widths (for example,
+    # clearing a matrix with sd before filling its halfword components).
+    # These accesses must not inherit each other's load/store types.
+    access_width = (
+        size
+        if target_info.arch == Target.ArchEnum.MIPS
+        and target_info.compiler == Target.CompilerEnum.IDO
+        else 0
+    )
+    type: Type = stack_info.unique_type_for(
+        "struct", (uw_var, offset, access_width), Type.any()
+    )
 
     if offset >= 0x200000:
         # Structs realistically aren't larger than 2 MB. The offset is more likely
@@ -467,7 +516,11 @@ def add_imm(
                 if target_size and imm.value % target_size == 0:
                     # Pointer addition.
                     return BinaryOp(
-                        left=source, op="+", right=as_intish(imm), type=source.type
+                        left=source,
+                        op="+",
+                        right=as_intish(imm),
+                        type=source.type,
+                        byte_offset=True,
                     )
         return BinaryOp(left=source, op="+", right=as_intish(imm), type=Type.ptr())
     elif isinstance(source, Literal) and isinstance(imm, Literal):
@@ -643,6 +696,37 @@ def make_store_real(
         return None
     dest = deref(target, regs, stack_info, size=size, store=True)
     dest.type.unify(type)
+    target_info = stack_info.global_info.target
+    source_arg = early_unwrap(source_val)
+    if (
+        target_info.arch == Target.ArchEnum.MIPS
+        and target_info.compiler == Target.CompilerEnum.IDO
+        and size in (1, 2)
+        and isinstance(dest, StructAccess)
+        and isinstance(source_arg, Literal)
+        and (1 << (size * 8 - 1)) <= source_arg.value < (1 << (size * 8))
+        and not dest.type.is_signed()
+    ):
+        # Prefer unsigned for an ambiguous narrow field with a positive
+        # high-bit constant. IDO otherwise folds a byte store of 255 to
+        # -1. Infer only when compatible with the destination's existing type;
+        # explicit signed fields and negative/wider constants keep their types.
+        unsigned = Type.u8() if size == 1 else Type.u16()
+        if dest.type.unify(unsigned):
+            type = unsigned
+    # A narrow store truncates the value; it does not establish the width of
+    # an incoming parameter. In particular, IDO can emit sb/sh directly from
+    # a word-sized parameter. Keep unknown register arguments word-sized,
+    # while respecting narrow types supplied by context or other instructions.
+    if (
+        target_info.arch == Target.ArchEnum.MIPS
+        and target_info.compiler == Target.CompilerEnum.IDO
+        and size < 4
+        and isinstance(source_arg, PassedInArg)
+        and source_arg.loc.reg is not None
+        and source_val.type.get_size_bits() is None
+    ):
+        source_val.type.unify(Type.reg32(likely_float=False))
     return StoreStmt(source=as_type(source_val, type, silent=is_stack), dest=dest)
 
 

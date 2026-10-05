@@ -1,0 +1,1 @@
+--target mips-ido-c --valid-syntax --context context.c --function read_second

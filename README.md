@@ -292,6 +292,220 @@ To get pretty graph visualizations, install `graphviz` using `pip` and globally 
 
 ## Tests
 
+### Conker fork matching improvements
+
+The local IDO first-pass change keeps an unknown register parameter word-sized
+when it is used by a byte or halfword store. A store establishes the width of
+the destination, not the original parameter. Known narrow parameter types from
+context remain supported; the GCC target retains its existing inference.
+
+The 2026-10-04 pilot used 20 short Conker functions with narrow argument stores
+and 10 short controls, without source context, at baseline commit `708d2d2`.
+With Conker's pinned IDO 5.3 toolchain and its compilation flags, 29 of 30
+starters compiled. Complete reference `.text` and relocation matches increased
+from 12 to 16; 13 functions had fewer differing instruction words, and none
+regressed. The remaining compile failure was an unresolved pointer expression
+in `func_1507EB80`. The sample was selected for this failure family and does not
+estimate the match rate across the whole project.
+
+Pilot inputs, compiler output, disassembly, and results are saved locally under
+ignored `build/conker-first-pass/`. Generated field macros were used only in
+this experiment. These object comparisons do not record Conker matches or
+replace its independent full-span `CURRENT (0)` and integration gates.
+
+Run the regression checks with the development dependencies installed:
+
+```bash
+python3 run_tests.py -j 4
+mypy
+black --check m2c/evaluate.py tests/unit/test_mips.py
+git diff --check
+```
+
+The new regression fixture was generated from its `orig.c` with pinned IDO,
+using `tests/add_test.py --target irix-o2`. The unchanged baseline inferred
+`s8` and `s16`; this checkout infers `s32` with casts at the stores.
+
+Conker can opt into this checkout for host starter generation:
+
+```bash
+CONKER_MIPS_TO_C=/Users/troy/Development/decompilation/m2c-conker/m2c.py ./conker next --ready
+```
+
+Run that command from Conker's repository after verifying that its wrapper
+honors the override. Some versions of `scripts/conker.sh` unconditionally
+replace `CONKER_MIPS_TO_C` in `run_host_mips_to_c`; those need a local adapter
+that selects the supplied path, validates it and uses its directory for
+`PYTHONPATH`. With no override, keep the default pinned host tool. The compiler
+and Docker toolchain remain pinned. Cloud workspaces need their own checkout
+of this fork, at the tested branch/commit, rather than the Mac path above.
+
+A second local fix uses `M2C_FIELD` to cast a computed integer address
+before dereferencing it in valid-syntax output. It preserves known integer
+address types and existing pointer/array accesses; it does not guess an original
+pointer parameter type. This fixes the pilot's `func_1507EB80` compile failure.
+
+A third local IDO fix captures reused byte and halfword global loads in a
+temporary, preserving the ASM register's snapshot across potentially aliasing
+stores. On the corrected source-context pilot, `func_1510D874` improves from
+`CURRENT (605)` to `CURRENT (255)`. Across 18 comparable functions the average
+falls from 426.11 to 406.67 (4.56%), with one improvement and no regressions.
+The corrected benchmark compiles only the target function with canonical
+declarations, so shorter candidates cannot include neighboring functions in
+their score. These measurements are first-pass scores, not accepted matches.
+
+A fourth local fix converts aligned ASM pointer byte offsets to C element
+counts at formatting time, preserving raw IR offsets for field recovery.
+For real Conker `func_15016370`, `s32_pointer += 0x32C` becomes
+`+= 0xCB`, restoring the compiled advance from `0xCB0` to `0x32C` bytes.
+Its full-span first-pass score improves from 165 to 160; the other 42 scorable
+pilot cases are unchanged. Seven unsupported starters are excluded and no new
+zero-score starter is produced. Word, halfword, byte and negative steps have
+focused regressions; existing SH and void-pointer expectations were corrected
+against their original source and ASM. The rejected stack-argument snapshot
+experiment gave no score improvement and was not adopted.
+
+A fifth fix preserves the distinct symbols and addends in memory `%lo`
+relocations when their base is directly defined by a symbolic MIPS `lui`.
+Reusing one upper half previously redirected later accesses to the first
+global. For real Conker `func_151E81EC`, the starter now clears all five intended
+globals instead of only three. Its pinned IDO object score rises from 205 to
+400 because compiling the separate canonical globals introduces two extra
+address loads; the old lower score described incorrect C. This is a correctness
+repair, not a score improvement or new zero-score starter. The other 42
+comparable pilot cases are unchanged; seven unsupported starters are excluded.
+The earlier pilot averages include this incorrect starter. Matching hi/lo
+pairs and bases changed by arithmetic or address completion retain their prior
+handling. Six unit tests and a standalone ASM fixture cover destination
+identity, loads, relocation addends and those recovery limits.
+
+A sixth IDO fix keeps a previously loaded word-sized field in a temporary
+when a byte or halfword store to the same base precedes its later use. It
+preserves the ASM read order and keeps inferred and context-provided types.
+The rule is restricted to MIPS/IDO; unrelated bases and word stores retain
+existing handling. Real Conker `func_150CBF5C` improves from `CURRENT (130)` to
+`CURRENT (120)`, with the other 42 scorable cases unchanged and no regressions.
+The pilot covers 50 cases across 48 distinct functions (20 with context and
+30 without, with two overlaps); seven unsupported cases are excluded. The
+combined mean is 267.44 to 267.21, a small 0.087% decrease. There are no new
+zero-score starters; the previous five-global correctness fix remains intact.
+Six focused tests and a standalone fixture cover load order, scalar/pointer
+context types, compiler targeting and the rule's limits.
+
+A seventh IDO fix declares captured narrow global-load temporaries as `s32`.
+Byte and halfword load values fit this word-sized local and retain their C
+integer promotions. Only single-assignment snapshot locals are widened; load
+casts, global declarations, inferred return types and planned phi variables
+keep their types. Real Conker `func_1510D874` improves from `CURRENT (255)` to
+`CURRENT (20)`, removing an extra register copy. In the same 50-case pilot,
+one of 43 scorable cases improves, 42 are unchanged and none regress. The
+combined mean falls from 267.21 to 261.74 (2.05%); seven unsupported cases are
+excluded and no new zero-score starter is produced. The remaining score is
+from register choices, so this is a better first pass rather than an exact
+match. The selected pilot establishes a local benefit, not a corpus-wide rate.
+Signed byte/halfword loads and narrow explicit/inferred returns have focused
+regressions; the full suite passes 465 tests.
+
+An eighth IDO fix extends those word-sized snapshot declarations to captured
+byte/halfword field loads through pointers. Existing capture timing and load
+casts are retained; single-use reads and planned phi types stay unchanged.
+Real Conker `func_15033EC4` improves from `CURRENT (240)` to `CURRENT (55)`
+with and without source context. The paired 50-case pilot has two improved
+cases for this one function, 41 unchanged scores, no regressions and seven
+unsupported exclusions. The case mean falls from 261.74 to 253.14 (3.29%);
+counting each of the 41 scorable functions once, it falls from 247.68 to
+243.17 (1.82%). No new zero-score starter is produced, and the remaining target
+differences are register choices. Six focused tests cover signedness, narrow
+return types, GCC handling, word loads, single-use reads and branch joins;
+all 471 tests pass. These are first-pass pilot results rather than a measured
+corpus-wide improvement or accepted game-source matches.
+
+A ninth local IDO fix prefers an unsigned byte/halfword field when a stored
+positive constant has its high bit set and the destination type is compatible.
+This avoids IDO shortening a byte register value of 255 to -1. Known signed
+fields, signed loads, incoming parameter widths and other compiler targets
+retain their handling. Real Conker `func_1502EA60` and `func_1502EA7C` each
+improve from `CURRENT (5)` to `CURRENT (0)` without source context. In the same
+50-case pilot, two of 43 scorable cases improve and the other 41 are unchanged,
+with no regressions and seven unsupported exclusions. The case mean falls
+from 253.14 to 252.91 (0.092%); zero-score cases increase from 15 to 17.
+These are two new full-span zero-score starters, not recorded or integrated
+game-source matches. Eight focused tests and a standalone fixture cover
+constant ranges, signed contexts/loads, global fields, compiler targeting and
+parameter widths; all 480 tests pass. This improvement is local and unpushed.
+
+A further IDO recovery captures scaled integer addresses as explicitly cast
+pointer locals while retaining integer operand and parameter types. Known
+pointer arithmetic and constant field offsets retain their handling. Real
+Conker `func_15087FC4` improves from `CURRENT (10)` to `CURRENT (0)`. An expanded
+98-case pilot across 96 distinct functions includes the original 50 cases and
+48 deterministic controls covering floating-point operations, branches/loops,
+direct calls and bit operations. Of 74 scorable cases, one improves and 73
+are unchanged, with no regressions; 24 unsupported or compile-failing cases
+remain excluded. All 17 existing zeros survive and one new full-span zero
+starter is produced. Six focused tests cover pointer conversions, integer
+parameter types, load returns, input reuse, compiler targeting and rule limits;
+all 486 tests pass. Updated array/address fixtures preserve their original
+byte addresses and add explicit C pointer conversions. These pilot zeros are
+not recorded or integrated game-source matches.
+
+IDO overlapping field accesses retain their individual instruction widths,
+including partial stores to known pointer/structure fields. The 98-case Conker
+pilot improves `func_150A7C10` from `CURRENT (6845)` to `CURRENT (6655)`;
+73 other scorable cases and all 18 existing zeros are unchanged. Seven focused
+regressions cover mixed widths, signed loads, explicit context, union members
+and plain-pointer inference; all 493 tests pass. No game source is modified.
+
+Valid-syntax output uses byte-pointer casts for void-pointer arithmetic,
+including increments and pointer differences, without changing context types.
+In the same 98-case Conker pilot, eight previously compile-failing starters
+become scorable; all 74 prior scores and 18 zeros remain unchanged. Seven
+focused arithmetic/type-preservation tests and all 500 suite tests pass.
+
+Function definitions retain explicitly volatile scalar parameters from context,
+including typedef qualifiers, while preserving their ABI widths. This restores
+compilation of Conker `func_151D5D60` (`CURRENT (615)`); all 82 previously
+scorable pilot cases and 18 zeros are unchanged. Seven focused tests and all
+507 tests pass. Division fixtures now retain the qualifiers in their `orig.c`.
+
+Valid-syntax equality between differently typed object pointers compares their
+addresses through explicit void-pointer casts, preserving the original target
+types. Conker `func_1509CB68` and `func_1503B840` now compile and score 1910
+and 1770 respectively; all 83 prior scores and 18 zeros are unchanged. Seven
+focused comparison tests and all 514 suite tests pass.
+
+Unknown external globals used only by address can be represented in valid C
+as byte storage of unspecified extent, without assuming an object layout.
+Typed field accesses retain the original instruction widths and offsets;
+context types, defined data and globals read by value retain their handling.
+Five formerly unsupported Conker starters become scorable. Four have full-span
+`CURRENT (0)`: `func_15125690`, `func_1503DF0C`, `func_15052F58` and
+`func_150221E8`; `func_1517E05C` scores 100. All 85 prior scores remain
+unchanged. Six focused tests and all 520 tests pass. These are standalone
+first-pass results, not integrated game-source matches.
+
+IDO recovery recognizes homogeneous copied stack arrays when a masked index
+proves that an indirect byte access stays within their inferred storage. The
+valid C expression uses the local object's address instead of an undefined
+physical stack pointer; out-of-bounds and unmasked cases retain their handling.
+`func_151D9918` and `func_151D9A20` now compile and score 360 each; all 90
+prior scorable cases and 22 zeros are unchanged. Six focused bound/layout
+tests and all 526 tests pass.
+
+IDO captures an earlier signed halfword field load before a later unsigned
+halfword load from the same object, preserving the ASM evaluation order and
+word-sized register snapshot without changing field/return widths. Conker
+`func_1515F008` improves from `CURRENT (60)` to `CURRENT (45)`; the other
+91 scorable cases and all 22 zeros are unchanged. Six focused regressions
+and all 532 suite tests pass.
+
+IDO snapshots field pointers before reading their targets, preserving context
+pointer types. Target stores retain their existing form: a broader capture
+rule was rejected because it regressed two zero starters. The narrowed rule
+improves `func_15104520` 25 to 15, `func_150B66DC` 855 to 725 and
+`func_15133EEC` 2587 to 2517; all 89 other scorable cases and 22 zeros
+remain unchanged. Seven focused tests and all 539 suite tests pass.
+
 There is a small test suite, which works as follows:
  - As you develop your commit, occasionally run `./run_tests.py` to see if any tests have changed output.
    These tests run the decompiler on a small corpus of assembly.

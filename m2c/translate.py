@@ -396,6 +396,23 @@ class StackInfo:
         return self.param_names.get(loc)
 
     def add_local_var(self, var: LocalVar) -> None:
+        if (
+            var.path is not None
+            and len(var.path) > 2
+            and self.stack_pointer_type is not None
+            and self.global_info.target.arch == Target.ArchEnum.MIPS
+            and self.global_info.target.compiler == Target.CompilerEnum.IDO
+        ):
+            target = self.stack_pointer_type.get_pointer_target()
+            if target is not None and target.is_struct():
+                struct = target.data().struct
+                assert struct is not None
+                for field in struct.fields:
+                    if field.name == var.path[1] and field.type.is_array():
+                        var = LocalVar(
+                            field.offset, type=field.type, path=[0, field.name]
+                        )
+                        break
         if any(v.value == var.value for v in self.local_vars):
             return
         self.local_vars.append(var)
@@ -567,16 +584,16 @@ class StackInfo:
             return True
         return False
 
-    def get_struct_type_map(self) -> Dict[Expression, Dict[int, Type]]:
-        """Reorganize struct information in unique_type_map by var & offset"""
-        struct_type_map: Dict[Expression, Dict[int, Type]] = {}
+    def get_struct_type_map(self) -> Dict[Expression, Dict[Tuple[int, int], Type]]:
+        """Reorganize struct information by var, offset and access width."""
+        struct_type_map: Dict[Expression, Dict[Tuple[int, int], Type]] = {}
         for (category, key), type in self.unique_type_map.items():
             if category != "struct":
                 continue
-            var, offset = typing.cast(Tuple[Expression, int], key)
+            var, offset, size = typing.cast(Tuple[Expression, int, int], key)
             if var not in struct_type_map:
                 struct_type_map[var] = {}
-            struct_type_map[var][offset] = type
+            struct_type_map[var][offset, size] = type
         return struct_type_map
 
     def __str__(self) -> str:
@@ -1047,6 +1064,7 @@ class BinaryOp(Condition):
     op: str
     right: Expression
     type: Type
+    byte_offset: bool = False
 
     @staticmethod
     def int(left: Expression, op: str, right: Expression) -> BinaryOp:
@@ -1218,6 +1236,22 @@ class BinaryOp(Condition):
     def normalize_for_formatting(self) -> BinaryOp:
         right_expr = late_unwrap(self.right)
         if (
+            self.byte_offset
+            and self.op in ("+", "-")
+            and isinstance(right_expr, Literal)
+        ):
+            target = self.left.type.decay().get_pointer_target()
+            size = target.get_size_bytes() if target is not None else None
+            if size and right_expr.value % size == 0:
+                # ASM pointer immediates count bytes; C pointer arithmetic
+                # counts elements. Keep the IR byte offset until formatting
+                # so dereference/field recovery still sees the raw address.
+                return replace(
+                    self,
+                    right=Literal(right_expr.value // size, type=right_expr.type),
+                    byte_offset=False,
+                ).normalize_for_formatting()
+        if (
             not self.is_floating()
             and isinstance(right_expr, Literal)
             and right_expr.value < 0
@@ -1232,6 +1266,16 @@ class BinaryOp(Condition):
                 expr = BinaryOp(op=self.op, left=self.left, right=right, type=self.type)
                 return expr
         return self
+
+    def uses_void_pointer_arithmetic(self) -> bool:
+        if self.op not in ("+", "-"):
+            return False
+        return any(self.is_void_pointer(expr.type) for expr in (self.left, self.right))
+
+    @staticmethod
+    def is_void_pointer(type: Type) -> bool:
+        target = type.get_pointer_target()
+        return type.is_pointer() and (target is None or target.is_void())
 
     def format(self, fmt: Formatter) -> str:
         left_expr = late_unwrap(self.left)
@@ -1273,6 +1317,34 @@ class BinaryOp(Condition):
             rhs = right_expr.format(fmt, force_dec=True)
         else:
             rhs = right_expr.format(fmt)
+
+        if fmt.valid_syntax and self.uses_void_pointer_arithmetic():
+            # ASM offsets on void pointers count bytes. Use byte pointers in
+            # the emitted expression without changing context or inferred types.
+            byte_pointer = Type.ptr(Type.u8()).format(fmt)
+            if self.is_void_pointer(left_expr.type):
+                lhs = f"({byte_pointer}) {left_expr.format(fmt)}"
+            if self.is_void_pointer(right_expr.type):
+                rhs = f"({byte_pointer}) {right_expr.format(fmt)}"
+
+        if fmt.valid_syntax and self.op in ("==", "!="):
+            left_pointer = left_expr.type.decay()
+            right_pointer = right_expr.type.decay()
+            left_target = left_pointer.get_pointer_target()
+            right_target = right_pointer.get_pointer_target()
+            if (
+                left_target is not None
+                and right_target is not None
+                and not left_target.is_void()
+                and not right_target.is_void()
+                and not left_target.is_function()
+                and not right_target.is_function()
+                and left_pointer.format(fmt) != right_pointer.format(fmt)
+            ):
+                # IDO rejects equality between differently typed object
+                # pointers. Compare addresses without unifying their targets.
+                lhs = f"(void *) {left_expr.format(fmt)}"
+                rhs = f"(void *) {right_expr.format(fmt)}"
 
         # These aren't real operators (or functions); format them as a fn call
         if self.op in PSEUDO_FUNCTION_OPS:
@@ -1634,12 +1706,38 @@ class StructAccess(Expression):
         has_nonzero_access = False
         if self.stack_info is not None:
             has_nonzero_access = self.stack_info.has_nonzero_access(var)
+            indexed_stack = bounded_stack_index(var)
+            if (
+                fmt.valid_syntax
+                and indexed_stack is not None
+                and self.stack_info.global_info.target.arch == Target.ArchEnum.MIPS
+                and self.stack_info.global_info.target.compiler
+                == Target.CompilerEnum.IDO
+            ):
+                index, maximum = indexed_stack
+                for local in self.stack_info.local_vars:
+                    size = local.type.get_size_bytes()
+                    if (
+                        local.type.is_array()
+                        and size is not None
+                        and self.target_size is not None
+                        and local.value <= self.offset
+                        and self.offset + maximum + self.target_size
+                        <= local.value + size
+                    ):
+                        # Replace a bounded access through the physical stack
+                        # pointer with the corresponding local object's address.
+                        offset = fmt.format_int(self.offset - local.value)
+                        address = f"((u8 *) &{local.format(fmt)} + ({format_expr(index, fmt)}))"
+                        return f"M2C_FIELD({address}, {Type.ptr(self.type).format(fmt)}, {offset})"
 
         field_path: Optional[AccessPath] = self.late_field_path()
 
         if field_path is not None and field_path != [0]:
             has_nonzero_access = True
-        elif fmt.valid_syntax and (self.offset != 0 or has_nonzero_access):
+        elif fmt.valid_syntax and (
+            field_path is None or self.offset != 0 or has_nonzero_access
+        ):
             offset_str = fmt.format_int(self.offset)
             return f"M2C_FIELD({var.format(fmt)}, {Type.ptr(self.type).format(fmt)}, {offset_str})"
         else:
@@ -1663,6 +1761,18 @@ class StructAccess(Expression):
 
         # Rewrite `x->unk0` to `*x` and `x.unk0` to `x`, unless has_nonzero_access
         if self.offset == 0 and not has_nonzero_access:
+            if (
+                fmt.valid_syntax
+                and deref
+                and isinstance(var, BinaryOp)
+                and var.op in ("+", "-")
+                and not var.left.type.is_pointer_or_array()
+                and not var.right.type.is_pointer_or_array()
+            ):
+                # The address expression may have acquired a pointer type
+                # without either operand becoming a pointer. Its C expression
+                # still computes an integer, so cast before dereferencing it.
+                return f"M2C_FIELD({var.format(fmt)}, {Type.ptr(self.type).format(fmt)}, 0)"
             return f"{'*' if deref else ''}{var.format(fmt)}"
 
         return f"{parenthesize_for_struct_access(var, fmt)}{field_name}"
@@ -1694,12 +1804,24 @@ class GlobalSymbol(Expression):
     initializer_in_typemap: bool = False
     demangled_str: Optional[str] = None
     is_referenced: bool = False
+    is_value_used: bool = False
 
     def dependencies(self) -> List[Expression]:
         return []
 
     def use(self) -> None:
         self.is_referenced = True
+        self.is_value_used = True
+
+    def is_unknown_address_storage(self, fmt: Formatter) -> bool:
+        return (
+            fmt.valid_syntax
+            and self.is_referenced
+            and not self.is_value_used
+            and not self.symbol_in_context
+            and self.asm_data_entry is None
+            and self.type.format(fmt) == "M2C_UNK"
+        )
 
     def is_string_constant(self) -> bool:
         ent = self.asm_data_entry
@@ -1822,8 +1944,16 @@ class AddressOf(Expression):
     def dependencies(self) -> List[Expression]:
         return [self.expr]
 
+    def use(self) -> None:
+        if isinstance(self.expr, GlobalSymbol):
+            self.expr.is_referenced = True
+        else:
+            super().use()
+
     def format(self, fmt: Formatter) -> str:
         if isinstance(self.expr, GlobalSymbol):
+            if self.expr.is_unknown_address_storage(fmt):
+                return f"((u8 *) {self.expr.format(fmt)})"
             if self.expr.is_string_constant():
                 return self.expr.format_string_constant(fmt)
         if self.expr.type.is_array():
@@ -2703,8 +2833,39 @@ class InstrArgs:
             return self.full_imm(index)
         raise DecompFailure(f"Bad function call operand {arg}")
 
+    def mips_hi_ref(self, reg: Register) -> Optional[RawSymbolRef]:
+        # Inspect the defining instruction, not just the simplified address:
+        # addiu with %lo also simplifies to that address, but consumes the hi.
+        if self.stack_info.global_info.target.arch != Target.ArchEnum.MIPS:
+            return None
+        value = self.regs.get_raw(reg)
+        if not isinstance(value, EvalOnceExpr) or len(value.sources) != 1:
+            return None
+        source = value.sources[0]
+        if not isinstance(source, InstrRef):
+            return None
+        instruction = source.instruction
+        if instruction.arch_mnemonic(self.stack_info.global_info.arch) != "mips:lui":
+            return None
+        arg = instruction.args[1]
+        if isinstance(arg, Macro) and arg.macro_name == "hi":
+            return parse_symbol_ref(arg.argument)
+        return None
+
     def memory_ref(self, index: int) -> Union[AddressMode, RawSymbolRef]:
-        ret = strip_macros(self.raw_arg(index))
+        raw = self.raw_arg(index)
+        if (
+            isinstance(raw, AsmAddressMode)
+            and isinstance(raw.addend, Macro)
+            and raw.addend.macro_name == "lo"
+        ):
+            # One lui may serve several globals with the same upper half.
+            # A different %lo names the actual destination and its own addend.
+            ref = parse_symbol_ref(raw.addend.argument)
+            hi_ref = self.mips_hi_ref(raw.base)
+            if ref is not None and hi_ref is not None and ref != hi_ref:
+                return ref
+        ret = strip_macros(raw)
 
         # For MIPS, we want to allow "lw $v0, symbol + 4", which is outputted by
         # some disassemblers (like IDA) even though it isn't valid assembly.
@@ -2898,6 +3059,9 @@ def format_assignment(
     source = late_unwrap(source)
     if isinstance(source, BinaryOp) and source.op in COMPOUND_ASSIGNMENT_OPS:
         source = source.normalize_for_formatting()
+        if fmt.valid_syntax and source.uses_void_pointer_arithmetic():
+            # A void-pointer lvalue cannot use += or -= in IDO C.
+            return f"{dest.format(fmt)} = {format_expr(source, fmt)};"
         rhs = None
         if is_dest(late_unwrap(source.left)):
             rhs = source.right
@@ -3153,8 +3317,8 @@ def format_f64_imm(num: int) -> str:
 def strip_macros(arg: Argument) -> Argument:
     """Replace %lo(...) by 0, and assert that there are no %hi(...). We assume that
     %hi's only ever occur in lui, where we expand them to an entire value, and not
-    just the upper part. This preserves semantics in most cases (though not when %hi's
-    are reused for different %lo's...)"""
+    just the upper part. InstrArgs.memory_ref recovers differing symbolic %lo's
+    with a directly defined MIPS lui base before reaching this fallback."""
     if isinstance(arg, Macro):
         if arg.macro_name in ["sda2", "sda21"]:
             return arg.argument
@@ -3692,17 +3856,52 @@ class NodeState:
         function_return: bool = False,
     ) -> Expression:
         source = self.regs.current_instr_ref()
+        word_snapshot = False
 
         if transparent is None:
             transparent = should_wrap_transparently(uw_expr)
+            target = self.stack_info.global_info.target
+            load = uw_expr
+            while isinstance(load, Cast):
+                load = load.expr
+            if (
+                target.arch == Target.ArchEnum.MIPS
+                and target.compiler == Target.CompilerEnum.IDO
+                and uw_expr.type.get_size_bytes() in (1, 2)
+                and isinstance(load, StructAccess)
+                and load.target_size in (1, 2)
+            ):
+                word_snapshot = True
+                if isinstance(load.struct_var, AddressOf) and isinstance(
+                    load.struct_var.expr, GlobalSymbol
+                ):
+                    # Keep reused narrow global loads as the ASM register's
+                    # snapshot. Repeated C reads may alias intervening stores.
+                    transparent = False
+                if uw_expr.type.is_unsigned() and load.target_size == 2:
+                    base = early_unwrap(load.struct_var)
+                    # Retain an earlier signed halfword load before a later
+                    # unsigned halfword load from the same object.
+                    self._prevent_later_uses(
+                        lambda e: isinstance(e, StructAccess)
+                        and e.target_size == 2
+                        and e.type.is_signed()
+                        and e.offset != load.offset
+                        and early_unwrap(e.struct_var) == base
+                    )
 
-        expr: RegExpression = self._eval_once(
+        expr = self._eval_once(
             uw_expr,
             emit_exactly_once=emit_exactly_once,
             transparent=transparent,
             reg=reg,
             source=source,
         )
+        if word_snapshot and not expr.var.is_planned:
+            # lb/lbu/lh/lhu results fit in s32, and C promotes both signed and
+            # unsigned byte/halfword values to s32. Widen only this single-write
+            # local declaration; keep the load and inferred ABI types intact.
+            expr.var.type = Type.s32()
 
         if reg == Register("zero"):
             # Emit the expression as is. It's probably a volatile load.
@@ -3800,6 +3999,24 @@ class NodeState:
         self.prevent_later_value_uses(dest)
         self.prevent_later_function_calls()
         self.write_statement(store)
+
+        target = self.stack_info.global_info.target
+        if (
+            target.arch == Target.ArchEnum.MIPS
+            and target.compiler == Target.CompilerEnum.IDO
+            and isinstance(dest, StructAccess)
+            and dest.target_size in (1, 2)
+        ):
+            # Keep an earlier word-sized field read as the register's snapshot
+            # when a narrow store to the same object precedes its later use.
+            # Besides preserving load order, this avoids extending that read
+            # across a write when the field layout is only partially known.
+            base = early_unwrap(dest.struct_var)
+            self._prevent_later_uses(
+                lambda expr: isinstance(expr, StructAccess)
+                and expr.target_size == 4
+                and early_unwrap(expr.struct_var) == base
+            )
 
     def push_subroutine_arg(self, source: Expression) -> None:
         self.subroutine_args = {
@@ -4238,6 +4455,37 @@ def translate_all_blocks(
                 translate_stack.append((state, child))
 
 
+def bounded_stack_index(var: Expression) -> Optional[Tuple[Expression, int]]:
+    """Recognize sp + ((unsigned value & mask) * positive stride)."""
+    var = early_unwrap(var)
+    if not isinstance(var, BinaryOp) or var.op != "+":
+        return None
+    for base, index in ((var.left, var.right), (var.right, var.left)):
+        base = early_unwrap(base)
+        scaled = early_unwrap(index)
+        if not (
+            isinstance(base, GlobalSymbol)
+            and base.c_symbol_name == "sp"
+            and not base.symbol_in_context
+            and isinstance(scaled, BinaryOp)
+            and scaled.op == "*"
+        ):
+            continue
+        stride = early_unwrap(scaled.right)
+        masked = early_unwrap(scaled.left)
+        if not (
+            isinstance(stride, Literal)
+            and stride.value > 0
+            and isinstance(masked, BinaryOp)
+            and masked.op == "&"
+        ):
+            continue
+        mask = early_unwrap(masked.right)
+        if isinstance(mask, Literal) and 0 <= mask.value <= 0xFFFF:
+            return index, mask.value * stride.value
+    return None
+
+
 def resolve_types_late(stack_info: StackInfo) -> None:
     """
     After translating a function, perform a final type-resolution pass.
@@ -4249,13 +4497,52 @@ def resolve_types_late(stack_info: StackInfo) -> None:
 
     # Use dereferences to determine pointer types
     struct_type_map = stack_info.get_struct_type_map()
+    indexed_stack_accesses = [
+        (offsets, indexed[1])
+        for var, offsets in struct_type_map.items()
+        if (indexed := bounded_stack_index(var)) is not None
+    ]
     for var, offset_type_map in struct_type_map.items():
-        if len(offset_type_map) == 1 and 0 in offset_type_map:
+        if len(offset_type_map) == 1 and next(iter(offset_type_map))[0] == 0:
             # var was probably a plain pointer, not a struct
             # Try to unify it with the appropriate pointer type,
             # to fill in the type if it does not already have one
-            type = offset_type_map[0]
+            type = next(iter(offset_type_map.values()))
             var.type.unify(Type.ptr(type))
+        elif (
+            indexed_stack_accesses
+            and stack_info.global_info.target.arch == Target.ArchEnum.MIPS
+            and stack_info.global_info.target.compiler == Target.CompilerEnum.IDO
+            and isinstance(var, AddressOf)
+            and isinstance(var.expr, LocalVar)
+            and var.expr.type.get_size_bytes() is None
+        ):
+            keys = sorted(offset_type_map)
+            width = keys[0][1]
+            element = offset_type_map[keys[0]]
+            length = len(keys)
+            start = var.expr.value
+            end = start + width * length
+            if (
+                width > 0
+                and keys == [(i * width, width) for i in range(length)]
+                and element.format(Formatter())
+                in ("s8", "u8", "s16", "u16", "s32", "u32", "s64", "u64")
+                and all(
+                    t.format(Formatter()) == element.format(Formatter())
+                    for t in offset_type_map.values()
+                )
+                and end <= stack_info.allocated_stack_size
+                and not any(
+                    start < local.value < end for local in stack_info.local_vars
+                )
+                and any(
+                    start <= offset and offset + maximum + access_width <= end
+                    for accesses, maximum in indexed_stack_accesses
+                    for offset, access_width in accesses
+                )
+            ):
+                var.expr.type.unify(Type.array(element, length))
 
 
 @dataclass
@@ -4704,11 +4991,18 @@ class GlobalInfo:
 
                 qualifier = f"{qualifier} " if qualifier else ""
                 value = f" = {value}" if value else ""
+                declaration = sym.type.to_decl(name, fmt)
+                if sym.is_unknown_address_storage(fmt):
+                    # No object layout is known or required: only its address
+                    # is used. Keep the extent unspecified and let each typed
+                    # field access express its actual instruction width.
+                    declaration = Type.array(Type.u8(), None).to_decl(name, fmt)
+                    comments.append("unknown layout; byte-addressed storage")
                 lines.append(
                     (
                         sort_order,
                         fmt.with_comments(
-                            f"{qualifier}{sym.type.to_decl(name, fmt)}{value};",
+                            f"{qualifier}{declaration}{value};",
                             comments,
                         )
                         + "\n",

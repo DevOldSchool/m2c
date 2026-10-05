@@ -7,7 +7,7 @@ void test(u32 a) {
     test_u32_mod(a);
 }
 
-void test_s8(s8 c) {
+void test_s8(volatile s8 c) {
     s8 sp0;
 
     sp0 = c;
@@ -27,7 +27,7 @@ void test_s8(s8 c) {
     foo(sp0 % 255);
 }
 
-void test_s16(s16 h) {
+void test_s16(volatile s16 h) {
     s16 sp0;
 
     sp0 = h;
@@ -51,7 +51,7 @@ void test_s16(s16 h) {
     foo(sp0 % 65534);
 }
 
-void test_s32_div(s32 d) {
+void test_s32_div(volatile s32 d) {
     s32 sp0;
     s32 var_r4;
     s32 var_r4_2;
@@ -146,7 +146,7 @@ void test_s32_div(s32 d) {
     foo((u32) -sp0);
 }
 
-void test_s32_mod(s32 d) {
+void test_s32_mod(volatile s32 d) {
     s32 sp0;
     s32 var_r1;
     s32 var_r1_2;
@@ -241,7 +241,7 @@ void test_s32_mod(s32 d) {
     foo(0U);
 }
 
-void test_u32_div(u32 u) {
+void test_u32_div(volatile u32 u) {
     u32 sp0;
     s32 temp_mach;
     s32 temp_mach_2;
@@ -309,7 +309,7 @@ void test_u32_div(u32 u) {
     foo(sp0 >= -1U);
 }
 
-void test_u32_mod(u32 u) {
+void test_u32_mod(volatile u32 u) {
     u32 sp0;
     s32 temp_mach;
     s32 temp_mach_2;
