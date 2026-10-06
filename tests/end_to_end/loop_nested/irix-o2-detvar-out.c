@@ -1,4 +1,5 @@
 s32 test(s32 arg0) {
+    s32 temp_cond_25;
     s32 temp_t1_12;
     s32 var_a1_11;
     s32 var_a2_18;
@@ -24,8 +25,9 @@ s32 test(s32 arg0) {
                         var_a1_11 = var_a3_17;
                         var_v1_8 += var_a2_18;
                         var_a2_18 += var_v0_6;
+                        temp_cond_25 = temp_t1_12 != var_a3_17;
                         var_a3_17 += 1;
-                    } while (temp_t1_12 != var_a3_17);
+                    } while (temp_cond_25);
                     if (var_a1_11 != arg0) {
                         goto block_6;
                     }
