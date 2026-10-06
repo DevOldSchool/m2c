@@ -506,6 +506,28 @@ improves `func_15104520` 25 to 15, `func_150B66DC` 855 to 725 and
 `func_15133EEC` 2587 to 2517; all 89 other scorable cases and 22 zeros
 remain unchanged. Seven focused tests and all 539 suite tests pass.
 
+MIPS o32 calls with outgoing stack arguments now retain available incoming
+integer argument registers when inferring an unknown callee's parameters.
+Previously, an untouched leading register could disappear, shifting every
+later argument into the wrong ABI slot. Known signatures, floating-point
+ambiguity, unavailable registers after calls, other ABIs and calls without
+stack arguments retain their handling. This is a bounded inference rule, not
+complete signature recovery.
+
+A separate 49-case pilot across 48 Conker functions (48 without context and
+one known-callee context control) reproduces the missing argument in
+`func_15166F6C` and `func_15005DB0`. Their standalone full-span scores change
+from 1149 to 883 and 1879 to 425 after restoring the forwarded first argument.
+The old calls are semantically wrong, so their scores are diagnostic rather
+than valid matching baselines. The other 47 outputs are byte-for-byte unchanged;
+48 cases compile and score in both versions, including the same 25 zeros.
+One pre-existing pointer-comparison compile failure remains. This is a new
+cohort, not a rerun of the earlier 98-case pilot, and no integrated Conker match
+is claimed. Nine unit regressions and a standalone nine-argument call fixture
+bring the passing suite to 549 tests. Three paired generation rounds over the
+cohort take median 7.147 seconds before and 7.288 seconds after (including process
+startup); no runtime speedup or measured human-time saving is claimed.
+
 There is a small test suite, which works as follows:
  - As you develop your commit, occasionally run `./run_tests.py` to see if any tests have changed output.
    These tests run the decompiler on a small corpus of assembly.
