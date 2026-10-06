@@ -528,6 +528,21 @@ bring the passing suite to 549 tests. Three paired generation rounds over the
 cohort take median 7.147 seconds before and 7.288 seconds after (including process
 startup); no runtime speedup or measured human-time saving is claimed.
 
+Valid-syntax dereferences of byte-address arithmetic retain the load/store type.
+Casting a void or unknown-layout pointer to `u8 *` makes the address calculation
+valid C, but directly dereferencing that expression would read or write one byte,
+lose signed-byte extension, or convert a byte numerically instead of loading a
+float. An explicit typed field access preserves the recovered memory operation;
+known element-pointer accesses and diagnostic output keep their existing form.
+
+On the same 49-case pilot with the three merged follow-ups as its baseline, all
+49 cases compile. This correction changes two outputs: `func_1508BF14` scores
+13756 to 12806, and `func_15009150` scores 200 to 0 over its complete 128-byte span,
+including padding. The latter's text, relocations and layout equal the reference;
+it was already matched in Conker, so this adds no integrated match. All previous
+25 zero-score starters are preserved. Executable regressions cover signed and
+wide loads, float loads, stores and nested addresses; known-pointer controls pass.
+
 There is a small test suite, which works as follows:
  - As you develop your commit, occasionally run `./run_tests.py` to see if any tests have changed output.
    These tests run the decompiler on a small corpus of assembly.

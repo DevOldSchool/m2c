@@ -1794,12 +1794,17 @@ class StructAccess(Expression):
                 and deref
                 and isinstance(var, BinaryOp)
                 and var.op in ("+", "-")
-                and not var.left.type.is_pointer_or_array()
-                and not var.right.type.is_pointer_or_array()
+                and (
+                    var.uses_byte_pointer_arithmetic()
+                    or (
+                        not var.left.type.is_pointer_or_array()
+                        and not var.right.type.is_pointer_or_array()
+                    )
+                )
             ):
-                # The address expression may have acquired a pointer type
-                # without either operand becoming a pointer. Its C expression
-                # still computes an integer, so cast before dereferencing it.
+                # An integer address or byte-address arithmetic does not carry
+                # the access's type. Preserve its width and signedness instead
+                # of dereferencing the formatter's u8 pointer directly.
                 return f"M2C_FIELD({var.format(fmt)}, {Type.ptr(self.type).format(fmt)}, 0)"
             return f"{'*' if deref else ''}{var.format(fmt)}"
 
