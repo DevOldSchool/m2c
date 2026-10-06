@@ -173,6 +173,15 @@ def other_f64_reg(reg: Register) -> Register:
     return Register(f"f{num ^ 1}")
 
 
+def handle_abs_intrinsic(
+    a: InstrArgs, name: str, value: Expression, type: Type
+) -> Expression:
+    info = a.stack_info.global_info
+    if info.target.compiler == Target.CompilerEnum.IDO:
+        info.ido_abs_intrinsics[name] = type
+    return fn_op(name, [value], type)
+
+
 class DivPattern(SimpleAsmPattern):
     pattern = make_pattern(
         "bnez $q, .A",
@@ -1598,7 +1607,9 @@ class MipsArch(Arch):
         "add.s": lambda a: handle_add_float(a),
         "sub.s": lambda a: BinaryOp.f32(a.reg(1), "-", a.reg(2)),
         "neg.s": lambda a: UnaryOp("-", as_f32(a.reg(1)), type=Type.f32()),
-        "abs.s": lambda a: fn_op("fabsf", [as_f32(a.reg(1))], Type.f32()),
+        "abs.s": lambda a: handle_abs_intrinsic(
+            a, "fabsf", as_f32(a.reg(1)), Type.f32()
+        ),
         "sqrt.s": lambda a: fn_op("sqrtf", [as_f32(a.reg(1))], Type.f32()),
         "div.s": lambda a: BinaryOp.f32(a.reg(1), "/", a.reg(2)),
         "mul.s": lambda a: BinaryOp.f32(a.reg(1), "*", a.reg(2)),
@@ -1606,7 +1617,9 @@ class MipsArch(Arch):
         "add.d": lambda a: handle_add_double(a),
         "sub.d": lambda a: BinaryOp.f64(a.dreg(1), "-", a.dreg(2)),
         "neg.d": lambda a: UnaryOp("-", as_f64(a.dreg(1)), type=Type.f64()),
-        "abs.d": lambda a: fn_op("fabs", [as_f64(a.dreg(1))], Type.f64()),
+        "abs.d": lambda a: handle_abs_intrinsic(
+            a, "fabs", as_f64(a.dreg(1)), Type.f64()
+        ),
         "sqrt.d": lambda a: fn_op("sqrt", [as_f64(a.dreg(1))], Type.f64()),
         "div.d": lambda a: BinaryOp.f64(a.dreg(1), "/", a.dreg(2)),
         "mul.d": lambda a: BinaryOp.f64(a.dreg(1), "*", a.dreg(2)),

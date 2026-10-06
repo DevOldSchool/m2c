@@ -653,3 +653,19 @@ which can run the CLI.
 ```bash
 m2c [options] [-t <target>] [--context <context file>] [-f <function name>] <asmfile>...
 ```
+
+IDO valid-syntax output now supplies the typed `fabsf`/`fabs` declaration and
+`#pragma intrinsic` needed for translated `abs.s`/`abs.d` instructions. Without
+these, IDO can compile an undeclared float operation as a double-argument call
+with an integer return. Existing context declarations are reused; ordinary
+external calls, mixed hardware/external uses of the same name, other compilers,
+diagnostic output and `--globals none` retain their prior handling. Square-root
+calls are outside this change because their fallback and error behavior needs
+separate review.
+
+On the same 49-case Conker cohort used above, all generated outputs and scores
+are unchanged. An eight-case expansion reproduces the plane-test helper
+`func_1510AEE0`: its generated starter's full-span score improves from 7674 to
+2737, with no new standalone zero or integrated match. Two unrelated expanded
+starters remain compile failures; this change does not infer their layouts or
+callee contracts.

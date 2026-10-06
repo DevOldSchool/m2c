@@ -4649,6 +4649,7 @@ class GlobalInfo:
     typepool: TypePool
     deterministic_vars: bool
     stack_spill_detection: bool
+    ido_abs_intrinsics: Dict[str, Type] = field(default_factory=dict)
     global_symbol_map: Dict[str, GlobalSymbol] = field(default_factory=dict)
     persistent_function_state: Dict[str, PersistentFunctionState] = field(
         default_factory=lambda: defaultdict(PersistentFunctionState)
@@ -5090,7 +5091,18 @@ class GlobalInfo:
                     )
                 )
         lines.sort()
-        return "".join(line for _, line in lines)
+        output = "".join(line for _, line in lines)
+        if fmt.valid_syntax and decls != Options.GlobalDeclsEnum.NONE:
+            for name, type in sorted(self.ido_abs_intrinsics.items()):
+                # A pragma also affects real calls with this name. Preserve those
+                # calls when hardware instructions and external calls coexist.
+                if name in self.global_symbol_map:
+                    continue
+                if name not in self.typemap.functions:
+                    spelling = type.format(fmt)
+                    output += f"{spelling} {name}({spelling});\n"
+                output += f"#pragma intrinsic({name})\n"
+        return output
 
 
 def narrow_func_call_outputs(
