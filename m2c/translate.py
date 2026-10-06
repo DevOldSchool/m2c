@@ -4141,6 +4141,24 @@ class NodeState:
             else:
                 likely_regs[reg] = True
 
+        if (
+            arch.arch == Target.ArchEnum.MIPS
+            and arch.home_space_size == 0x10
+            and not fn_sig.params_known
+            and any(offset >= arch.home_space_size for offset in self.subroutine_args)
+            and not any(
+                likely_regs.get(Register(f"f{i}"), False) for i in range(12, 16)
+            )
+        ):
+            # An outgoing stack argument follows the four o32 integer slots.
+            # Untouched incoming registers may be forwarded in those slots;
+            # dropping them shifts all later arguments, including stack ones.
+            # Do not invent registers clobbered by a previous call, or guess
+            # between integer and floating-point argument paths.
+            integer_regs = [Register(f"a{i}") for i in range(4)]
+            if all(reg in likely_regs for reg in integer_regs):
+                likely_regs.update(dict.fromkeys(integer_regs, True))
+
         abi = arch.function_abi(fn_sig, likely_regs, for_call=True)
 
         func_args: List[Expression] = []
