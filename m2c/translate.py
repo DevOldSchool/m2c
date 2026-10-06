@@ -3711,6 +3711,10 @@ class NodeState:
 
     to_write: List[Union[Statement]] = field(default_factory=list)
     branch_condition: Optional[Condition] = None
+    branch_condition_value: Optional[EvalOnceExpr] = None
+    branch_condition_clobbers: List[Callable[[Expression], bool]] = field(
+        default_factory=list
+    )
     switch_control: Optional[SwitchControl] = None
     has_function_call: bool = False
 
@@ -3793,6 +3797,10 @@ class NodeState:
     def _prevent_later_uses(self, expr_filter: Callable[[Expression], bool]) -> None:
         """Prevent later uses of registers that recursively contain something that
         matches a callback filter."""
+        condition = self.branch_condition_value
+        if condition is not None:
+            self.branch_condition_clobbers.append(expr_filter)
+
         for r, data in self.regs.contents.items():
             expr = data.value
             if isinstance(expr, (PlannedPhiExpr, NaivePhiExpr)):
@@ -3967,6 +3975,16 @@ class NodeState:
         assert isinstance(self.node, ConditionalNode)
         assert self.branch_condition is None
         self.branch_condition = cond
+        # A delay-slot instruction can overwrite a value already tested by the
+        # branch. Reserve a snapshot here, and emit it only if a later write
+        # would otherwise change the condition before control flow consumes it.
+        self.branch_condition_value = self._eval_once(
+            cond,
+            emit_exactly_once=False,
+            transparent=True,
+            reg=Register("condition_bit"),
+            source=self.regs.current_instr_ref(),
+        )
 
     def set_switch_expr(self, expr: Expression, just_index: bool = False) -> None:
         assert isinstance(self.node, SwitchNode)
@@ -4233,6 +4251,17 @@ def translate_node_body(state: NodeState) -> BlockInfo:
 
     if state.branch_condition is not None:
         state.branch_condition.use()
+        condition = state.branch_condition_value
+        assert condition is not None
+        # Wait until delay-slot assignments have selected their own temporaries.
+        # Reuse those snapshots when possible, but do not assume that a single
+        # prior use of an expression will itself force a snapshot here.
+        if any(
+            uses_expr_sub(condition, clobber, False, True, set())
+            for clobber in state.branch_condition_clobbers
+        ):
+            condition.force()
+            state.branch_condition = ExprCondition(condition, Type.boolean())
     if state.switch_control is not None:
         state.switch_control.control_expr.use()
 
