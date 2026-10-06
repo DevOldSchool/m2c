@@ -1267,15 +1267,21 @@ class BinaryOp(Condition):
                 return expr
         return self
 
-    def uses_void_pointer_arithmetic(self) -> bool:
+    def uses_byte_pointer_arithmetic(self) -> bool:
         if self.op not in ("+", "-"):
             return False
-        return any(self.is_void_pointer(expr.type) for expr in (self.left, self.right))
+        return any(
+            self.needs_byte_pointer_cast(expr.type) for expr in (self.left, self.right)
+        )
 
     @staticmethod
-    def is_void_pointer(type: Type) -> bool:
+    def needs_byte_pointer_cast(type: Type) -> bool:
         target = type.get_pointer_target()
-        return type.is_pointer() and (target is None or target.is_void())
+        return type.is_pointer() and (
+            target is None
+            or target.is_void()
+            or (target.get_size_bytes() is None and not target.is_function())
+        )
 
     def format(self, fmt: Formatter) -> str:
         left_expr = late_unwrap(self.left)
@@ -1318,18 +1324,29 @@ class BinaryOp(Condition):
         else:
             rhs = right_expr.format(fmt)
 
-        if fmt.valid_syntax and self.uses_void_pointer_arithmetic():
-            # ASM offsets on void pointers count bytes. Use byte pointers in
-            # the emitted expression without changing context or inferred types.
+        def emitted_pointer_type(expr: Expression) -> Type:
+            if (
+                isinstance(expr, AddressOf)
+                and isinstance(expr.expr, GlobalSymbol)
+                and expr.expr.is_unknown_address_storage(fmt)
+            ):
+                # AddressOf emits these unknown globals as byte storage.
+                return Type.ptr(Type.u8())
+            return expr.type.decay()
+
+        if fmt.valid_syntax and self.uses_byte_pointer_arithmetic():
+            # ASM offsets on pointers without a known element size count bytes.
+            # M2C_UNK is a word-sized C placeholder, not a recovered layout.
+            # Cast the expression without changing context or inferred types.
             byte_pointer = Type.ptr(Type.u8()).format(fmt)
-            if self.is_void_pointer(left_expr.type):
+            if self.needs_byte_pointer_cast(emitted_pointer_type(left_expr)):
                 lhs = f"({byte_pointer}) {left_expr.format(fmt)}"
-            if self.is_void_pointer(right_expr.type):
+            if self.needs_byte_pointer_cast(emitted_pointer_type(right_expr)):
                 rhs = f"({byte_pointer}) {right_expr.format(fmt)}"
 
         if fmt.valid_syntax and self.op in ("==", "!="):
-            left_pointer = left_expr.type.decay()
-            right_pointer = right_expr.type.decay()
+            left_pointer = emitted_pointer_type(left_expr)
+            right_pointer = emitted_pointer_type(right_expr)
             left_target = left_pointer.get_pointer_target()
             right_target = right_pointer.get_pointer_target()
             if (
@@ -1350,7 +1367,18 @@ class BinaryOp(Condition):
         if self.op in PSEUDO_FUNCTION_OPS:
             return f"{self.op}({lhs}, {rhs})"
 
-        return f"({lhs} {self.op} {rhs})"
+        expression = f"({lhs} {self.op} {rhs})"
+        if (
+            fmt.valid_syntax
+            and self.uses_byte_pointer_arithmetic()
+            and self.needs_byte_pointer_cast(self.type)
+        ):
+            target = self.type.get_pointer_target()
+            if target is not None and not target.is_void():
+                # A byte-address expression still has the original pointer type
+                # when assigned, returned or passed to a typed callee.
+                return f"(({self.type.format(fmt)}) {expression})"
+        return expression
 
 
 @dataclass(frozen=True, eq=False)
@@ -3059,8 +3087,9 @@ def format_assignment(
     source = late_unwrap(source)
     if isinstance(source, BinaryOp) and source.op in COMPOUND_ASSIGNMENT_OPS:
         source = source.normalize_for_formatting()
-        if fmt.valid_syntax and source.uses_void_pointer_arithmetic():
-            # A void-pointer lvalue cannot use += or -= in IDO C.
+        if fmt.valid_syntax and source.uses_byte_pointer_arithmetic():
+            # Keep byte-address arithmetic explicit instead of scaling by a
+            # void or unknown pointee in a compound assignment.
             return f"{dest.format(fmt)} = {format_expr(source, fmt)};"
         rhs = None
         if is_dest(late_unwrap(source.left)):
