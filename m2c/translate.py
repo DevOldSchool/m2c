@@ -1292,6 +1292,39 @@ class BinaryOp(Condition):
             return adj.format(fmt)
 
         if (
+            fmt.valid_syntax
+            and self.op == "<<"
+            and isinstance(right_expr, Literal)
+            and isinstance(
+                left_expr,
+                (
+                    StructAccess,
+                    ArrayAccess,
+                    GlobalSymbol,
+                    PassedInArg,
+                    LocalVar,
+                ),
+            )
+            and left_expr.type.is_signed()
+            and left_expr.type.get_size_bits() in (8, 16)
+            and self.type.get_size_bits() in (None, 32)
+        ):
+            bits = left_expr.type.get_size_bits()
+            assert bits is not None
+            if 0 < right_expr.value <= 32 - bits:
+                # A signed narrow value may be negative, making a C left shift
+                # undefined. Scaling its entire range by this power of two fits
+                # in a signed 32-bit int. Only use declared values/loads here:
+                # arithmetic expressions can retain narrow IR types even though
+                # C integer promotion makes their actual range wider.
+                return BinaryOp(
+                    left=self.left,
+                    op="*",
+                    right=Literal(1 << right_expr.value),
+                    type=self.type,
+                ).format(fmt)
+
+        if (
             self.is_comparison()
             and isinstance(left_expr, Literal)
             and not isinstance(right_expr, Literal)
