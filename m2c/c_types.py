@@ -100,7 +100,7 @@ class Enum:
 @dataclass(eq=False)
 class TypeMap:
     # Change VERSION if TypeMap changes to invalidate all preexisting caches
-    VERSION: ClassVar[int] = 10
+    VERSION: ClassVar[int] = 11
 
     source_hash: str
     base_struct_align: int
@@ -311,6 +311,74 @@ def is_unk_type(type: CType, typemap: TypeMap) -> bool:
             type = type.type
         else:
             return False
+
+
+def normalize_old_style_function(node: ca.FuncDef, typemap: TypeMap) -> None:
+    """Recover the calling types of an identifier-list function definition.
+
+    Support word-sized integers and pointers. Byte/halfword integers arrive as
+    int on the supported targets; narrowing is part of the callee's assembly,
+    not a narrow prototype for its callers. Floating and multiword parameters
+    need separate ABI work (in particular, float would arrive as double).
+    """
+    fn = type_of_var_decl(node.decl)
+    if not isinstance(fn, FuncDecl) or not fn.args:
+        return
+    if not any(isinstance(arg, ca.ID) for arg in fn.args.params):
+        return
+    names = []
+    for arg in fn.args.params:
+        if not isinstance(arg, ca.ID) or arg.name in names:
+            raise DecompFailure("Invalid K&R parameter list: " + to_c(fn))
+        names.append(arg.name)
+
+    declarations = {}
+    for decl in node.param_decls or []:
+        if decl.name not in names or decl.name in declarations:
+            raise DecompFailure("Invalid K&R parameter declaration: " + to_c(decl))
+        declarations[decl.name] = decl
+
+    params: List[Union[ca.Decl, ca.ID, ca.Typename, ca.EllipsisParam]] = []
+    for name in names:
+        if name in declarations:
+            decl = copy.deepcopy(declarations[name])
+        else:
+            # C89 permits a parameter omitted from the declaration list: int.
+            decl = ca.Decl(
+                name, [], [], [], [], [], basic_type(["int"]), None, None, None
+            )
+        declared = type_of_var_decl(decl)
+        resolved, _ = resolve_typedefs(declared, typemap)
+        promoted: Optional[CType] = None
+        if isinstance(resolved, TypeDecl) and isinstance(resolved.type, IdentifierType):
+            words = resolved.type.names
+            if (
+                any(word in words for word in ("float", "double", "void"))
+                or primitive_size(resolved.type) > 4
+            ):
+                raise DecompFailure("Unsupported K&R parameter type: " + to_c(decl))
+            if any(word in words for word in ("char", "short", "_Bool")):
+                if "volatile" in decl.quals + resolved.quals:
+                    raise DecompFailure(
+                        "Unsupported volatile K&R promotion: " + to_c(decl)
+                    )
+                promoted = basic_type(["int"])
+            if isinstance(promoted, TypeDecl):
+                # Retain parameter-object qualifiers, including qualified typedefs.
+                promoted.quals = list(dict.fromkeys(decl.quals + resolved.quals))
+        elif isinstance(resolved, ArrayDecl):
+            promoted = PtrDecl(quals=resolved.dim_quals, type=resolved.type)
+        elif isinstance(resolved, FuncDecl):
+            promoted = pointer(resolved)
+        elif not isinstance(resolved, PtrDecl) and not (
+            isinstance(resolved, TypeDecl) and isinstance(resolved.type, ca.Enum)
+        ):
+            raise DecompFailure("Unsupported K&R parameter type: " + to_c(decl))
+        if promoted is not None:
+            decl.type = promoted
+        set_decl_name(decl)
+        params.append(decl)
+    fn.args = ca.ParamList(params)
 
 
 def parse_function(fn: CType) -> Optional[Function]:
@@ -898,6 +966,7 @@ def _build_typemap(
                     typemap.struct_typedefs[item.type.type] = typedef
             if isinstance(item, ca.FuncDef):
                 assert item.decl.name is not None, "cannot define anonymous function"
+                normalize_old_style_function(item, typemap)
                 fn = parse_function(type_of_var_decl(item.decl))
                 assert fn is not None
                 typemap.functions[item.decl.name] = fn
