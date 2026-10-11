@@ -419,6 +419,35 @@ class StackInfo:
         # Make sure the local vars stay sorted in order on the stack.
         self.local_vars.sort(key=lambda v: v.value)
 
+    def size_open_local_arrays(self) -> None:
+        """Give stack arrays of unknown extent the dimension that fills their slot.
+
+        C rejects `T spXX[];` as a local declaration. The array cannot extend
+        past the next stack object above it, the callee-save region, or the
+        frame, so use that gap as its dimension.
+        """
+        for index, var in enumerate(self.local_vars):
+            element, dim = var.type.get_array()
+            if element is None or dim is not None or not var.type.is_array():
+                continue
+            element_size = element.get_size_bytes()
+            if not element_size:
+                continue
+            bound = self.allocated_stack_size
+            for other in self.local_vars[index + 1 :]:
+                # Inner fields belong to an already declared object.
+                if other.path is not None and len(other.path) > 2:
+                    continue
+                if other.value > var.value:
+                    bound = min(bound, other.value)
+                    break
+            save_start = self.callee_save_reg_region[0]
+            if save_start > var.value:
+                bound = min(bound, save_start)
+            count = (bound - var.value) // element_size
+            if count > 0:
+                var.type.unify(Type.array(element, count))
+
     def add_argument(self, arg: PassedInArg) -> None:
         for a in self.arguments:
             if a.loc == arg.loc:

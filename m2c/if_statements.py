@@ -1492,6 +1492,8 @@ def get_function_text(function_info: FunctionInfo, options: Options) -> str:
         # Format the body first, because this can result in additional type inferencce
         formatted_body = body.format(fmt)
 
+        if fmt.valid_syntax:
+            function_info.stack_info.size_open_local_arrays()
         local_vars = function_info.stack_info.local_vars
         # GCC's stack is ordered low-to-high (e.g. `int sp10; int sp14;`)
         # IDO's and MWCC's stack is ordered high-to-low (e.g. `int sp14; int sp10;`)
