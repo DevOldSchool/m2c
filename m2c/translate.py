@@ -5,6 +5,7 @@ from contextlib import contextmanager
 from dataclasses import dataclass, field, replace
 from enum import Enum, auto
 import math
+import re
 import struct
 import sys
 import traceback
@@ -23,7 +24,7 @@ from typing import (
     Union,
 )
 
-from .c_types import ArchC, CType, TypeMap, is_unk_type
+from .c_types import ArchC, CType, TypeMap, declaration_string, is_unk_type
 from .demangle_codewarrior import parse as demangle_codewarrior_parse, CxxSymbol
 from .error import DecompFailure, assert_never
 from .flow_graph import (
@@ -418,6 +419,35 @@ class StackInfo:
         self.local_vars.append(var)
         # Make sure the local vars stay sorted in order on the stack.
         self.local_vars.sort(key=lambda v: v.value)
+
+    def size_open_local_arrays(self) -> None:
+        """Give stack arrays of unknown extent the dimension that fills their slot.
+
+        C rejects `T spXX[];` as a local declaration. The array cannot extend
+        past the next stack object above it, the callee-save region, or the
+        frame, so use that gap as its dimension.
+        """
+        for index, var in enumerate(self.local_vars):
+            element, dim = var.type.get_array()
+            if element is None or dim is not None or not var.type.is_array():
+                continue
+            element_size = element.get_size_bytes()
+            if not element_size:
+                continue
+            bound = self.allocated_stack_size
+            for other in self.local_vars[index + 1 :]:
+                # Inner fields belong to an already declared object.
+                if other.path is not None and len(other.path) > 2:
+                    continue
+                if other.value > var.value:
+                    bound = min(bound, other.value)
+                    break
+            save_start = self.callee_save_reg_region[0]
+            if save_start > var.value:
+                bound = min(bound, save_start)
+            count = (bound - var.value) // element_size
+            if count > 0:
+                var.type.unify(Type.array(element, count))
 
     def add_argument(self, arg: PassedInArg) -> None:
         for a in self.arguments:
@@ -1041,6 +1071,8 @@ class SecondF64Half(Expression):
         return []
 
     def format(self, fmt: Formatter) -> str:
+        if fmt.valid_syntax:
+            return "M2C_ERROR(/* second half of f64 */)"
         return "(second half of f64)"
 
 
@@ -1281,6 +1313,8 @@ class BinaryOp(Condition):
             target is None
             or target.is_void()
             or (target.get_size_bytes() is None and not target.is_function())
+            # A forward-declared struct is incomplete, with no C size.
+            or (target.is_struct() and target.get_size_bytes() == 0)
         )
 
     def format(self, fmt: Formatter) -> str:
@@ -1377,6 +1411,20 @@ class BinaryOp(Condition):
             if self.needs_byte_pointer_cast(emitted_pointer_type(right_expr)):
                 rhs = f"({byte_pointer}) {right_expr.format(fmt)}"
 
+        if (
+            fmt.valid_syntax
+            and self.op == "-"
+            and emitted_pointer_type(left_expr).is_pointer()
+            and emitted_pointer_type(right_expr).is_pointer()
+            and emitted_pointer_type(left_expr).format(fmt)
+            != emitted_pointer_type(right_expr).format(fmt)
+        ):
+            # C only subtracts pointers to the same type. The ASM difference
+            # counts bytes, so subtract byte addresses.
+            byte_pointer = Type.ptr(Type.u8()).format(fmt)
+            lhs = f"({byte_pointer}) {left_expr.format(fmt)}"
+            rhs = f"({byte_pointer}) {right_expr.format(fmt)}"
+
         if fmt.valid_syntax and self.op in ("==", "!="):
             left_pointer = emitted_pointer_type(left_expr)
             right_pointer = emitted_pointer_type(right_expr)
@@ -1395,6 +1443,24 @@ class BinaryOp(Condition):
                 # pointers. Compare addresses without unifying their targets.
                 lhs = f"(void *) {left_expr.format(fmt)}"
                 rhs = f"(void *) {right_expr.format(fmt)}"
+            elif left_pointer.is_pointer() != right_pointer.is_pointer():
+                # IDO also rejects comparing a pointer with a non-constant
+                # integer. Compare the integer as an address.
+                integer, integer_type = (
+                    (right_expr, right_pointer)
+                    if left_pointer.is_pointer()
+                    else (left_expr, left_pointer)
+                )
+                if (
+                    not isinstance(integer, Literal)
+                    and not integer_type.is_array()
+                    and not integer_type.is_float()
+                    and not integer_type.is_function()
+                ):
+                    if integer is right_expr:
+                        rhs = f"(void *) {rhs}"
+                    else:
+                        lhs = f"(void *) {lhs}"
 
         # These aren't real operators (or functions); format them as a fn call
         if self.op in PSEUDO_FUNCTION_OPS:
@@ -1871,6 +1937,8 @@ class GlobalSymbol(Expression):
     demangled_str: Optional[str] = None
     is_referenced: bool = False
     is_value_used: bool = False
+    # Argument counts of calls made without a known prototype
+    guessed_call_arities: Set[int] = field(default_factory=set)
 
     def dependencies(self) -> List[Expression]:
         return []
@@ -1886,7 +1954,8 @@ class GlobalSymbol(Expression):
             and not self.is_value_used
             and not self.symbol_in_context
             and self.asm_data_entry is None
-            and self.type.format(fmt) == "M2C_UNK"
+            # An object cannot have type void; only its address is known.
+            and (self.type.format(fmt) == "M2C_UNK" or self.type.is_void())
         )
 
     def is_string_constant(self) -> bool:
@@ -4236,6 +4305,11 @@ class NodeState:
             # Without that assumption, the logic from `function_abi` would be needed here.
             for i, (arg_expr, param) in enumerate(zip(func_args, fn_sig.params)):
                 func_args[i] = as_type(arg_expr, param.type.decay(), True)
+            target_sym = early_unwrap(fn_target)
+            if isinstance(target_sym, AddressOf) and isinstance(
+                target_sym.expr, GlobalSymbol
+            ):
+                target_sym.expr.guessed_call_arities.add(len(func_args))
 
         # Reset subroutine_args, for the next potential function call.
         self.subroutine_args.clear()
@@ -4932,6 +5006,41 @@ class GlobalInfo:
 
         return forward_declares_needed
 
+    def placeholder_position(self) -> Optional[int]:
+        """Position of the earliest `#pragma GLOBAL_ASM` placeholder, in the
+        context, of a function being decompiled."""
+        positions = [
+            self.typemap.asm_pragma_positions[function]
+            for function in self.local_functions
+            if function in self.typemap.asm_pragma_positions
+        ]
+        return min(positions) if positions else None
+
+    def declared_after_placeholder(self, name: str) -> bool:
+        placeholder = self.placeholder_position()
+        position = self.typemap.decl_positions.get(name)
+        return (
+            placeholder is not None and position is not None and position > placeholder
+        )
+
+    def context_declaration(self, name: str) -> Optional[str]:
+        fn = self.typemap.functions.get(name)
+        ctype = fn.type if fn is not None else self.typemap.var_types.get(name)
+        if ctype is None:
+            return None
+        text = declaration_string(ctype, name)
+        # Never repeat an inline struct/union/enum definition.
+        return None if "{" in text else text
+
+    def uses_later_typedef(self, declaration: str) -> bool:
+        placeholder = self.placeholder_position()
+        if placeholder is None:
+            return False
+        return any(
+            self.typemap.typedef_positions.get(word, -1) > placeholder
+            for word in re.findall(r"[A-Za-z_]\w*", declaration)
+        )
+
     def global_decls(
         self,
         fmt: Formatter,
@@ -4983,7 +5092,13 @@ class GlobalInfo:
                 if self.local_functions == {name}:
                     # Skip the function being decompiled if just a single one
                     continue
-                if not is_in_file and sym.type_provided:
+                declared_later = (
+                    fmt.valid_syntax
+                    and not is_in_file
+                    and sym.type_provided
+                    and self.declared_after_placeholder(name)
+                )
+                if not is_in_file and sym.type_provided and not declared_later:
                     # Skip externally-declared symbols that are defined in other files
                     continue
 
@@ -5107,6 +5222,29 @@ class GlobalInfo:
                 qualifier = f"{qualifier} " if qualifier else ""
                 value = f" = {value}" if value else ""
                 declaration = sym.type.to_decl(name, fmt)
+                if declared_later:
+                    # Repeat the context's own spelling: m2c types drop
+                    # qualifiers such as const, making the two incompatible.
+                    declaration = self.context_declaration(name) or declaration
+                fn_sig = sym.type.data().fn_sig if sym.type.is_function() else None
+                if fmt.valid_syntax and fn_sig is not None:
+                    unprototyped_reason = None
+                    if not fn_sig.params_known and len(sym.guessed_call_arities) > 1:
+                        # Calls disagree on the guessed argument count, and a
+                        # prototype would reject all but one of them.
+                        unprototyped_reason = "call arities differ"
+                    elif self.uses_later_typedef(declaration):
+                        unprototyped_reason = "parameter types declared later"
+                    if unprototyped_reason is not None:
+                        unprototyped = FunctionSignature(return_type=fn_sig.return_type)
+                        declaration = Type.function(unprototyped).to_decl(name, fmt)
+                        comments.append(f"unprototyped: {unprototyped_reason}")
+                if fmt.valid_syntax and self.uses_later_typedef(declaration):
+                    # The type is not visible before this function either.
+                    if declared_later or fn_sig is not None:
+                        continue
+                if declared_later:
+                    comments.append("declared after this function in context")
                 if sym.is_unknown_address_storage(fmt):
                     # No object layout is known or required: only its address
                     # is used. Keep the extent unspecified and let each typed
@@ -5131,7 +5269,10 @@ class GlobalInfo:
                 # calls when hardware instructions and external calls coexist.
                 if name in self.global_symbol_map:
                     continue
-                if name not in self.typemap.functions:
+                if (
+                    name not in self.typemap.functions
+                    or self.declared_after_placeholder(name)
+                ):
                     spelling = type.format(fmt)
                     output += f"{spelling} {name}({spelling});\n"
                 output += f"#pragma intrinsic({name})\n"

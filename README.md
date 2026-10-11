@@ -543,6 +543,51 @@ it was already matched in Conker, so this adds no integrated match. All previous
 25 zero-score starters are preserved. Executable regressions cover signed and
 wide loads, float loads, stores and nested addresses; known-pointer controls pass.
 
+#### Starters that compile unedited (2026-10-11)
+
+Measured on the 201 never-attempted US GAME functions of Conker's 2026-10-11
+starter comparison (every third `./conker next` entry), generated through
+Conker's unchanged `scripts/m2c.py` wrapper and scored unedited with
+`./conker probe` after prepending the `M2C_*` macros:
+
+| Generator | Starters compiled |
+| --- | --- |
+| Fork `a03c6f2` | 79 |
+| This change | 124 |
+
+No starter lost compilation and all 79 previously compiling starters keep
+identical scores. Fixes, by first compile error at `a03c6f2`:
+
+- Stack slots that are only read, such as vector members filled by a callee
+  through a neighbouring local's address, are declared. A narrow read inside
+  a wider local reads through it (`M2C_FIELD(&sp184, u8 *, 1)`), not an
+  undeclared `unkspXX` (29 of 38 undeclared stack locals now compile).
+- Stack arrays of unknown extent take the dimension that fills their slot
+  instead of `T spXX[];` (5 of 9 compile; 4 now stop at an undeclared global).
+- A callee without a known prototype whose calls disagree on argument count is
+  declared without a prototype. A later `T f();` no longer discards an earlier
+  context prototype `T f(void);` (9 of 13 arity mismatches compile).
+- Valid-syntax output no longer prints `second half of f64` as text. It
+  byte-addresses forward-declared struct pointers and differences of
+  differently typed pointers, compares pointers with non-constant integers as
+  addresses, and does not declare address-only globals as `void`.
+
+Most remaining failures need source context that matches the starter's
+position. When the context contains the function's own
+`#pragma GLOBAL_ASM(".../<function>.s")` placeholder, m2c now redeclares
+referenced globals, functions and IDO intrinsics that the context first
+declares after it, in the context's own spelling. Declarations whose types use
+typedefs declared later are not emitted, and guessed prototypes using them
+become unprototyped. Conker's wrapper currently strips these pragmas, so this
+has no effect on the numbers above. Contexts without the placeholder are
+unaffected.
+
+In an experiment that kept the placeholders in the wrapper's flattened context,
+patched in memory without changing Conker, 162 of the 201 starters compile.
+That is 38 more than 124, with none lost. Of the 124, four score lower and one
+scores 150 higher (`func_150417AC`, 67521 to 67671). Those changes come only
+from the added real prototypes, which replace implicit `int` declarations.
+
 There is a small test suite, which works as follows:
  - As you develop your commit, occasionally run `./run_tests.py` to see if any tests have changed output.
    These tests run the decompiler on a small corpus of assembly.

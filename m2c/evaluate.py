@@ -72,6 +72,40 @@ def error_stmt(msg: str) -> ExprStmt:
     return ExprStmt(ErrorExpr(msg))
 
 
+def inner_stack_access(
+    var: LocalVar, size: int, stack_info: StackInfo
+) -> Optional[Expression]:
+    """Read part of a wider stack local, e.g. one byte of a halfword slot.
+
+    Such a location has no field of its own, and its fallback `unkspXX` name
+    would be undeclared C. Address it through the containing local instead.
+    """
+    if (
+        stack_info.global_info.target.arch != Target.ArchEnum.MIPS
+        or stack_info.global_info.target.compiler != Target.CompilerEnum.IDO
+        or stack_info.in_callee_save_reg_region(var.value)
+    ):
+        return None
+    for outer in stack_info.local_vars:
+        outer_size = outer.type.get_size_bytes()
+        if (
+            outer.path is not None
+            and len(outer.path) == 2
+            and outer_size is not None
+            and outer.value < var.value
+            and var.value + size <= outer.value + outer_size
+        ):
+            return StructAccess(
+                struct_var=AddressOf(outer, type=outer.type.reference()),
+                offset=var.value - outer.value,
+                target_size=size,
+                field_path=None,
+                stack_info=stack_info,
+                type=Type.any_reg(),
+            )
+    return None
+
+
 def deref(
     arg: Union[AddressMode, RawSymbolRef, Expression],
     regs: RegInfo,
@@ -86,7 +120,16 @@ def deref(
     elif isinstance(arg, AddressMode):
         offset = arg.offset
         if stack_info.is_stack_reg(arg.base):
-            return stack_info.get_stack_var(offset, store=store)
+            stack_var = stack_info.get_stack_var(offset, store=store)
+            if not store and isinstance(stack_var, LocalVar):
+                if stack_var.path is None:
+                    inner = inner_stack_access(stack_var, size, stack_info)
+                    if inner is not None:
+                        return inner
+                # A slot that is only read (e.g. filled by a callee through a
+                # neighbouring local's address) must still be declared.
+                stack_info.add_local_var(stack_var)
+            return stack_var
         var = regs[arg.base]
     else:
         offset = arg.offset
