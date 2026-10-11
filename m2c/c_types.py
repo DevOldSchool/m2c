@@ -100,7 +100,7 @@ class Enum:
 @dataclass(eq=False)
 class TypeMap:
     # Change VERSION if TypeMap changes to invalidate all preexisting caches
-    VERSION: ClassVar[int] = 12
+    VERSION: ClassVar[int] = 13
 
     source_hash: str
     base_struct_align: int
@@ -118,6 +118,14 @@ class TypeMap:
     pragma_packs: Dict[StructUnion, int] = field(default_factory=dict)
     enums: Dict[Union[str, ca.Enum], Enum] = field(default_factory=dict)
     enum_values: Dict[str, int] = field(default_factory=dict)
+    # Order of top-level context items, for contexts that contain the
+    # `#pragma GLOBAL_ASM(".../<function>.s")` placeholder of the function
+    # being decompiled. A name first declared after that placeholder is not
+    # visible to C code that replaces it.
+    position_count: int = 0
+    asm_pragma_positions: Dict[str, int] = field(default_factory=dict)
+    decl_positions: Dict[str, int] = field(default_factory=dict)
+    typedef_positions: Dict[str, int] = field(default_factory=dict)
 
 
 def to_c(node: ca.Node) -> str:
@@ -892,6 +900,31 @@ def parse_c(
     return ast, c_parser._scope_stack[0].copy()
 
 
+GLOBAL_ASM_PRAGMA = re.compile(r'\s*GLOBAL_ASM\(\s*"(?:[^"]*/)?([^"/]+)\.s"\s*\)\s*$')
+
+
+def record_context_positions(ast: ca.FileAST, typemap: TypeMap) -> None:
+    for item in ast.ext:
+        position = typemap.position_count
+        typemap.position_count += 1
+        names: List[str] = []
+        if isinstance(item, ca.Pragma):
+            match = GLOBAL_ASM_PRAGMA.match(item.string)
+            if match:
+                typemap.asm_pragma_positions.setdefault(match.group(1), position)
+            continue
+        if isinstance(item, ca.Typedef):
+            if item.name is not None:
+                typemap.typedef_positions.setdefault(item.name, position)
+            continue
+        if isinstance(item, ca.FuncDef):
+            names = [item.decl.name] if item.decl.name is not None else []
+        elif isinstance(item, ca.Decl) and item.name is not None:
+            names = [item.name]
+        for name in names:
+            typemap.decl_positions.setdefault(name, position)
+
+
 def add_function(typemap: TypeMap, name: str, fn: Function) -> None:
     existing = typemap.functions.get(name)
     if existing is not None and existing.params is not None and fn.params is None:
@@ -951,6 +984,7 @@ def _build_typemap(
         ast, result_scope = parse_c(source, typemap.cparser_scope)
         typemap.cparser_scope = result_scope
         typemap.source_hash = source_hash
+        record_context_positions(ast, typemap)
 
         for item in ast.ext:
             if isinstance(item, ca.Typedef):

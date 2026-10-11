@@ -5,6 +5,7 @@ from contextlib import contextmanager
 from dataclasses import dataclass, field, replace
 from enum import Enum, auto
 import math
+import re
 import struct
 import sys
 import traceback
@@ -1936,6 +1937,8 @@ class GlobalSymbol(Expression):
     demangled_str: Optional[str] = None
     is_referenced: bool = False
     is_value_used: bool = False
+    # Argument counts of calls made without a known prototype
+    guessed_call_arities: Set[int] = field(default_factory=set)
 
     def dependencies(self) -> List[Expression]:
         return []
@@ -4302,6 +4305,11 @@ class NodeState:
             # Without that assumption, the logic from `function_abi` would be needed here.
             for i, (arg_expr, param) in enumerate(zip(func_args, fn_sig.params)):
                 func_args[i] = as_type(arg_expr, param.type.decay(), True)
+            target_sym = early_unwrap(fn_target)
+            if isinstance(target_sym, AddressOf) and isinstance(
+                target_sym.expr, GlobalSymbol
+            ):
+                target_sym.expr.guessed_call_arities.add(len(func_args))
 
         # Reset subroutine_args, for the next potential function call.
         self.subroutine_args.clear()
@@ -4998,6 +5006,32 @@ class GlobalInfo:
 
         return forward_declares_needed
 
+    def placeholder_position(self) -> Optional[int]:
+        """Position of the earliest `#pragma GLOBAL_ASM` placeholder, in the
+        context, of a function being decompiled."""
+        positions = [
+            self.typemap.asm_pragma_positions[function]
+            for function in self.local_functions
+            if function in self.typemap.asm_pragma_positions
+        ]
+        return min(positions) if positions else None
+
+    def declared_after_placeholder(self, name: str) -> bool:
+        placeholder = self.placeholder_position()
+        position = self.typemap.decl_positions.get(name)
+        return (
+            placeholder is not None and position is not None and position > placeholder
+        )
+
+    def uses_later_typedef(self, declaration: str) -> bool:
+        placeholder = self.placeholder_position()
+        if placeholder is None:
+            return False
+        return any(
+            self.typemap.typedef_positions.get(word, -1) > placeholder
+            for word in re.findall(r"[A-Za-z_]\w*", declaration)
+        )
+
     def global_decls(
         self,
         fmt: Formatter,
@@ -5049,7 +5083,13 @@ class GlobalInfo:
                 if self.local_functions == {name}:
                     # Skip the function being decompiled if just a single one
                     continue
-                if not is_in_file and sym.type_provided:
+                declared_later = (
+                    fmt.valid_syntax
+                    and not is_in_file
+                    and sym.type_provided
+                    and self.declared_after_placeholder(name)
+                )
+                if not is_in_file and sym.type_provided and not declared_later:
                     # Skip externally-declared symbols that are defined in other files
                     continue
 
@@ -5173,6 +5213,25 @@ class GlobalInfo:
                 qualifier = f"{qualifier} " if qualifier else ""
                 value = f" = {value}" if value else ""
                 declaration = sym.type.to_decl(name, fmt)
+                fn_sig = sym.type.data().fn_sig if sym.type.is_function() else None
+                if fmt.valid_syntax and fn_sig is not None:
+                    unprototyped_reason = None
+                    if not fn_sig.params_known and len(sym.guessed_call_arities) > 1:
+                        # Calls disagree on the guessed argument count, and a
+                        # prototype would reject all but one of them.
+                        unprototyped_reason = "call arities differ"
+                    elif self.uses_later_typedef(declaration):
+                        unprototyped_reason = "parameter types declared later"
+                    if unprototyped_reason is not None:
+                        unprototyped = FunctionSignature(return_type=fn_sig.return_type)
+                        declaration = Type.function(unprototyped).to_decl(name, fmt)
+                        comments.append(f"unprototyped: {unprototyped_reason}")
+                if fmt.valid_syntax and self.uses_later_typedef(declaration):
+                    # The type is not visible before this function either.
+                    if declared_later or fn_sig is not None:
+                        continue
+                if declared_later:
+                    comments.append("declared after this function in context")
                 if sym.is_unknown_address_storage(fmt):
                     # No object layout is known or required: only its address
                     # is used. Keep the extent unspecified and let each typed
@@ -5197,7 +5256,10 @@ class GlobalInfo:
                 # calls when hardware instructions and external calls coexist.
                 if name in self.global_symbol_map:
                     continue
-                if name not in self.typemap.functions:
+                if (
+                    name not in self.typemap.functions
+                    or self.declared_after_placeholder(name)
+                ):
                     spelling = type.format(fmt)
                     output += f"{spelling} {name}({spelling});\n"
                 output += f"#pragma intrinsic({name})\n"
