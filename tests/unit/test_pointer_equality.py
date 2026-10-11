@@ -44,8 +44,17 @@ class TestPointerEquality(unittest.TestCase):
             "a == b",
         )
 
-    def test_pointer_integer_comparison_does_not_cast_integer(self) -> None:
-        self.assertEqual(self.comparison(Type.ptr(Type.u8()), Type.s32()), "a == b")
+    def test_pointer_integer_comparison_compares_addresses(self) -> None:
+        # IDO rejects comparing a pointer with a non-constant integer.
+        self.assertEqual(
+            self.comparison(Type.ptr(Type.u8()), Type.s32()), "a == (void *) b"
+        )
+        self.assertEqual(
+            self.comparison(Type.s32(), Type.ptr(Type.u8()), "!="), "(void *) a != b"
+        )
+        self.assertEqual(
+            self.comparison(Type.ptr(Type.u8()), Type.s32(), valid=False), "a == b"
+        )
         pointer = GlobalSymbol(c_symbol_name="a", type=Type.ptr(Type.u8()))
         expr = BinaryOp(left=pointer, op="==", right=Literal(0), type=Type.boolean())
         self.assertEqual(format_expr(expr, Formatter(valid_syntax=True)), "a == NULL")

@@ -100,7 +100,7 @@ class Enum:
 @dataclass(eq=False)
 class TypeMap:
     # Change VERSION if TypeMap changes to invalidate all preexisting caches
-    VERSION: ClassVar[int] = 11
+    VERSION: ClassVar[int] = 12
 
     source_hash: str
     base_struct_align: int
@@ -892,6 +892,15 @@ def parse_c(
     return ast, c_parser._scope_stack[0].copy()
 
 
+def add_function(typemap: TypeMap, name: str, fn: Function) -> None:
+    existing = typemap.functions.get(name)
+    if existing is not None and existing.params is not None and fn.params is None:
+        # A later declaration without a parameter list does not remove an
+        # earlier prototype: the composite type keeps the parameters.
+        return
+    typemap.functions[name] = fn
+
+
 def build_typemap(source_paths: List[Path], arch: ArchC, use_cache: bool) -> TypeMap:
     # Wrapper to convert `source_paths` into a hashable type
     return _build_typemap(tuple(source_paths), arch, use_cache)
@@ -969,12 +978,12 @@ def _build_typemap(
                 normalize_old_style_function(item, typemap)
                 fn = parse_function(type_of_var_decl(item.decl))
                 assert fn is not None
-                typemap.functions[item.decl.name] = fn
+                add_function(typemap, item.decl.name, fn)
             if isinstance(item, ca.Decl) and isinstance(item.type, FuncDecl):
                 assert item.name is not None, "cannot define anonymous function"
                 fn = parse_function(item.type)
                 assert fn is not None
-                typemap.functions[item.name] = fn
+                add_function(typemap, item.name, fn)
 
         cur_pack = 0
         pack_stack: List[int] = []

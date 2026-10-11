@@ -1070,6 +1070,8 @@ class SecondF64Half(Expression):
         return []
 
     def format(self, fmt: Formatter) -> str:
+        if fmt.valid_syntax:
+            return "M2C_ERROR(/* second half of f64 */)"
         return "(second half of f64)"
 
 
@@ -1310,6 +1312,8 @@ class BinaryOp(Condition):
             target is None
             or target.is_void()
             or (target.get_size_bytes() is None and not target.is_function())
+            # A forward-declared struct is incomplete, with no C size.
+            or (target.is_struct() and target.get_size_bytes() == 0)
         )
 
     def format(self, fmt: Formatter) -> str:
@@ -1406,6 +1410,20 @@ class BinaryOp(Condition):
             if self.needs_byte_pointer_cast(emitted_pointer_type(right_expr)):
                 rhs = f"({byte_pointer}) {right_expr.format(fmt)}"
 
+        if (
+            fmt.valid_syntax
+            and self.op == "-"
+            and emitted_pointer_type(left_expr).is_pointer()
+            and emitted_pointer_type(right_expr).is_pointer()
+            and emitted_pointer_type(left_expr).format(fmt)
+            != emitted_pointer_type(right_expr).format(fmt)
+        ):
+            # C only subtracts pointers to the same type. The ASM difference
+            # counts bytes, so subtract byte addresses.
+            byte_pointer = Type.ptr(Type.u8()).format(fmt)
+            lhs = f"({byte_pointer}) {left_expr.format(fmt)}"
+            rhs = f"({byte_pointer}) {right_expr.format(fmt)}"
+
         if fmt.valid_syntax and self.op in ("==", "!="):
             left_pointer = emitted_pointer_type(left_expr)
             right_pointer = emitted_pointer_type(right_expr)
@@ -1424,6 +1442,24 @@ class BinaryOp(Condition):
                 # pointers. Compare addresses without unifying their targets.
                 lhs = f"(void *) {left_expr.format(fmt)}"
                 rhs = f"(void *) {right_expr.format(fmt)}"
+            elif left_pointer.is_pointer() != right_pointer.is_pointer():
+                # IDO also rejects comparing a pointer with a non-constant
+                # integer. Compare the integer as an address.
+                integer, integer_type = (
+                    (right_expr, right_pointer)
+                    if left_pointer.is_pointer()
+                    else (left_expr, left_pointer)
+                )
+                if (
+                    not isinstance(integer, Literal)
+                    and not integer_type.is_array()
+                    and not integer_type.is_float()
+                    and not integer_type.is_function()
+                ):
+                    if integer is right_expr:
+                        rhs = f"(void *) {rhs}"
+                    else:
+                        lhs = f"(void *) {lhs}"
 
         # These aren't real operators (or functions); format them as a fn call
         if self.op in PSEUDO_FUNCTION_OPS:
@@ -1915,7 +1951,8 @@ class GlobalSymbol(Expression):
             and not self.is_value_used
             and not self.symbol_in_context
             and self.asm_data_entry is None
-            and self.type.format(fmt) == "M2C_UNK"
+            # An object cannot have type void; only its address is known.
+            and (self.type.format(fmt) == "M2C_UNK" or self.type.is_void())
         )
 
     def is_string_constant(self) -> bool:
