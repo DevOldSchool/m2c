@@ -24,7 +24,7 @@ from typing import (
     Union,
 )
 
-from .c_types import ArchC, CType, TypeMap, is_unk_type
+from .c_types import ArchC, CType, TypeMap, declaration_string, is_unk_type
 from .demangle_codewarrior import parse as demangle_codewarrior_parse, CxxSymbol
 from .error import DecompFailure, assert_never
 from .flow_graph import (
@@ -5023,6 +5023,15 @@ class GlobalInfo:
             placeholder is not None and position is not None and position > placeholder
         )
 
+    def context_declaration(self, name: str) -> Optional[str]:
+        fn = self.typemap.functions.get(name)
+        ctype = fn.type if fn is not None else self.typemap.var_types.get(name)
+        if ctype is None:
+            return None
+        text = declaration_string(ctype, name)
+        # Never repeat an inline struct/union/enum definition.
+        return None if "{" in text else text
+
     def uses_later_typedef(self, declaration: str) -> bool:
         placeholder = self.placeholder_position()
         if placeholder is None:
@@ -5213,6 +5222,10 @@ class GlobalInfo:
                 qualifier = f"{qualifier} " if qualifier else ""
                 value = f" = {value}" if value else ""
                 declaration = sym.type.to_decl(name, fmt)
+                if declared_later:
+                    # Repeat the context's own spelling: m2c types drop
+                    # qualifiers such as const, making the two incompatible.
+                    declaration = self.context_declaration(name) or declaration
                 fn_sig = sym.type.data().fn_sig if sym.type.is_function() else None
                 if fmt.valid_syntax and fn_sig is not None:
                     unprototyped_reason = None

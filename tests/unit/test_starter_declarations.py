@@ -125,7 +125,23 @@ class TestStarterDeclarations(unittest.TestCase):
             "u32 foo(void);\n",
         )
         self.assertIn(
-            "u32 foo();                                          "
+            "u32 foo(void);                                      "
             "/* extern; declared after this function in context */",
             output,
         )
+
+    def test_redeclaration_keeps_context_qualifiers(self) -> None:
+        output = self.decompile(
+            """
+            addiu $sp, $sp, -0x18
+            sw $ra, 0x14($sp)
+            jal copy
+            nop
+            lw $ra, 0x14($sp)
+            jr $ra
+            addiu $sp, $sp, 0x18
+            """,
+            context='typedef unsigned int u32;\n#pragma GLOBAL_ASM("asm/test.s")\n'
+            "void *copy(void *, const void *, u32);\n",
+        )
+        self.assertIn("void *copy(void *, const void *, u32);", output)

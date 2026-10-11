@@ -1092,6 +1092,13 @@ def set_decl_name(decl: ca.Decl) -> None:
     type.declname = name
 
 
+def declaration_string(type: CType, name: str) -> str:
+    """Declare `name` with a context type, keeping its qualifiers and typedefs."""
+    decl = ca.Decl(name, [], [], [], [], [], copy.deepcopy(type), None, None, None)
+    set_decl_name(decl)
+    return to_c(decl)
+
+
 def type_to_string(type: CType, name: str = "") -> str:
     if isinstance(type, TypeDecl) and isinstance(
         type.type, (ca.Struct, ca.Union, ca.Enum)
